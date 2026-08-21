@@ -1,0 +1,50 @@
+name: Deploy Backend to EC2
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'backend/**'          # Only triggers when backend code changes
+
+jobs:
+  deploy:
+    name: SSH & Deploy to EC2
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to EC2 via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USERNAME }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          port: 22
+          script: |
+            set -e
+
+            echo "==> Navigating to project directory..."
+            cd /home/ubuntu/GLR-ATTENDANCE/backend
+
+            echo "==> Pulling latest code from GitHub..."
+            git pull origin main
+
+            echo "==> Activating virtual environment..."
+            source .venv/bin/activate
+
+            echo "==> Installing/updating dependencies..."
+            pip install -r requirements.txt --quiet
+
+            echo "==> Running database migrations..."
+            python migrate.py
+
+            echo "==> Restarting backend service..."
+            sudo systemctl restart glr-attendance
+
+            echo "==> Checking service status..."
+            sudo systemctl is-active glr-attendance
+
+            echo "✅ Deployment complete!"

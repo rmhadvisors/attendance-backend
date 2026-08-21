@@ -1,0 +1,82 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+import os
+from apscheduler.schedulers.background import BackgroundScheduler
+from app.services.reminder_scheduler import check_and_send_reminders
+
+from app.core.database import engine, Base
+
+# ── Import ALL models so create_all registers every table ──────────────────
+from app.models.user import User  # noqa: F401
+from app.models.attendance import AttendanceLog, AttendanceInterval  # noqa: F401
+from app.models.company import Company, Location  # noqa: F401
+from app.models.holiday import Holiday  # noqa: F401
+from app.models.working_days import WorkingDaysConfig  # noqa: F401
+from app.models.comp_off import CompOffBalance, CompOffTransaction  # noqa: F401
+from app.models.leave import LeaveRequest  # noqa: F401
+from app.models.payroll import MonthlySalary  # noqa: F401
+from app.models.notification import (  # noqa: F401
+    NotificationLog,
+    PushSubscription,
+    FaceVerificationFailure
+)
+
+# ── Create all tables (Already created, bypassed for near-instant startup) ──
+Base.metadata.create_all(bind=engine)
+
+# ── Safe Database Column Migrations (Bypassed for near-instant startup) ─────
+# from sqlalchemy import text
+# with engine.connect() as conn:
+#     try:
+#         conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS base_salary FLOAT DEFAULT 0.0;"))
+#         conn.commit()
+#     except Exception as e:
+#         print("Safe migration skipped or error:", e)
+
+from contextlib import asynccontextmanager
+
+scheduler = BackgroundScheduler()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    if not scheduler.running:
+        scheduler.add_job(check_and_send_reminders, 'cron', minute='*')
+        scheduler.start()
+    yield
+    if scheduler.running:
+        scheduler.shutdown()
+
+# ── App ─────────────────────────────────────────────────────────────────────
+app = FastAPI(title="GLR Attendance", lifespan=lifespan)
+
+# ── CORS Middleware ──────────────────────────────────────────────────────────
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.taxplanadvisor\.in|https://.*\.glrattendance\.com",
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ── Routers ─────────────────────────────────────────────────────────────────
+from app.routers import auth, employees, attendance, face, location, dashboard, export, company, leave, payroll, push  # noqa: E402
+
+app.include_router(auth.router)
+app.include_router(dashboard.router)
+app.include_router(attendance.router)
+app.include_router(face.router)
+app.include_router(location.router)
+app.include_router(export.router)
+app.include_router(employees.router)
+app.include_router(company.router)
+app.include_router(leave.router)
+app.include_router(payroll.router)
+app.include_router(push.router)
+
+
+
+@app.get("/")
+def home():
+    return {"message": "GLR Attendance Running"}
+

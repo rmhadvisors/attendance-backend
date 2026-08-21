@@ -1,0 +1,3 @@
+# Ignore documentation folder from GitHub
+frontend/
+docs/

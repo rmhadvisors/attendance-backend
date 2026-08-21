@@ -1,0 +1,200 @@
+from app.core import database
+from app.core import database
+from datetime import datetime, timedelta
+import logging
+from sqlalchemy.orm import Session
+from pywebpush import webpush, WebPushException
+import json
+from urllib.parse import urlparse
+
+from app.core.database import SessionLocal
+from app.utils.timezone import now_ist, today_ist
+from app.models.user import User
+from app.models.attendance import AttendanceLog
+from app.models.notification import NotificationLog, PushSubscription
+from app.models.holiday import Holiday
+from app.models.working_days import WorkingDaysConfig
+from app.routers.attendance import is_user_expected_working_day
+import os
+
+VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "9T4SHbsYgUO4pbpk5_SkqPuvuIZBBPohBXML1VSAmOE")
+#VAPID_CLAIMS = {"sub": "mailto:admin@glrattendance.com"}
+
+def calculate_target_time(preferred_time_str:str) -> str:
+    """Adds 30 minutes to 'HH:MM' string (e.g. '09:00' -> '09:30')"""
+    try:
+        t = datetime.strptime(preferred_time_str, '%H:%M')
+        t_plus_30 = t + timedelta(minutes=30)
+        return t_plus_30.strftime('%H:%M')
+    except ValueError:
+        return ""
+
+def check_and_send_reminders():
+    db: Session = SessionLocal()
+    try:
+        now = now_ist()
+        today = today_ist()
+        # 1. Exclude Sundays (weekday 6 is Sunday)
+        if today.weekday() == 6:
+            return
+        current_time_str = now.strftime("%H:%M")
+        # 2. Get holidays and working days map for Saturday check
+        holiday = db.query(Holiday).filter(Holiday.date == today).first()
+        working_days = db.query(WorkingDaysConfig).first()
+        days_map = [True, True, True, True, True, True, False]
+        if working_days:
+            days_map = [
+                working_days.monday, working_days.tuesday, working_days.wednesday,
+                working_days.thursday, working_days.friday, working_days.saturday,
+                working_days.sunday
+            ]
+        # 3. Query all users with reminders enabled
+        users = db.query(User).filter(
+            User.is_active == True,
+            User.enable_checkin_reminder == True
+        ).all()
+        for user in users:
+            # print(
+            #     f"\n========== CHECKING USER: {user.name} ({user.id}) =========="
+            # )
+
+            # print(f"Current IST time: {now}")
+            # print(f"Today: {today}")
+            # print(f"Preferred time: {user.preferred_checkin_time}")
+            # Verify if today is an expected working day for this user
+        
+
+            is_work_day = is_user_expected_working_day(
+                today,
+                user.saturday_policy,
+                {holiday.date} if holiday else set(),
+                days_map
+            )
+
+            # print(f"Is working day: {is_work_day}")
+            
+            if not is_work_day:
+                continue
+            # Parse preferred time HH:MM
+            pref_str = user.preferred_checkin_time or "09:00"
+            target_str = calculate_target_time(pref_str)
+
+            #print(f"Preferred time: {pref_str}")
+            #print(f"Target time (+30 min): {target_str}")
+
+            if not target_str:
+                continue
+
+            try:
+                target_h, target_m = map(int, target_str.split(":"))
+                current_minutes = now.hour * 60 + now.minute
+                target_minutes = target_h * 60 + target_m
+
+                #print(f"Current minutes: {current_minutes}")
+                #print(f"Target minutes: {target_minutes}")
+
+                # Send only after preferred time + 30 minutes
+                if current_minutes < target_minutes:
+                    # print("❌ SKIP: 30-minute waiting period has not passed")
+                    continue
+
+            except ValueError:
+                continue
+            # Check if user already checked in today
+            already_checked_in = db.query(AttendanceLog).filter(
+                AttendanceLog.user_id == user.id,
+                AttendanceLog.date == today,
+                AttendanceLog.checkin_time != None
+            ).first()
+            if already_checked_in:
+                #print(f"Already checked in: {bool(already_checked_in)}")
+                continue
+            # Check if reminder was already sent today
+            start_of_today = datetime(
+                today.year,
+                today.month,
+                today.day
+            )
+
+            today_sent = db.query(NotificationLog).filter(
+                NotificationLog.user_id == user.id,
+                NotificationLog.type == "checkin_reminder",
+                NotificationLog.status == "sent",
+                NotificationLog.sent_at >= start_of_today
+            ).first()
+
+            #print(f"Reminder already sent today: {bool(today_sent)}")
+
+            if today_sent:
+                #print("❌ SKIP: Reminder already sent today")
+                continue
+            #Send Web Push Notification to user's devices
+            subscriptions = db.query(PushSubscription).filter(
+                PushSubscription.user_id == user.id
+            ).all()
+            #print(f"Push subscriptions found: {len(subscriptions)}")
+
+            if not subscriptions:
+                #print("User has no subscriptions")
+                continue
+
+            sent_any = False
+            for sub in subscriptions:
+                endpoint = sub.endpoint
+
+                parsed = urlparse(endpoint)
+                audience = f"{parsed.scheme}://{parsed.netloc}"
+                # print(f"🌐 Push endpoint: {endpoint}")
+                # print(f"🎯 VAPID audience: {audience}")
+                try:
+                    #print(f"Attempting push for {user.name}")
+                    res = webpush(
+                        subscription_info={
+                            "endpoint": sub.endpoint,
+                            "keys": {"p256dh": sub.p256dh, "auth": sub.auth}
+                        },
+                        data=json.dumps({
+                            "title": "Check in Reminder ⏰",
+                            "body": "You forgot to check in today!"
+                        }),
+                        vapid_private_key=VAPID_PRIVATE_KEY,
+                        vapid_claims={
+                            "sub": "mailto:admin@glrattendance.com",
+                            "aud": audience
+                            },
+                        ttl=60
+                    )
+                    # print(
+                    #     f"✅ PUSH SENT to {user.name} "
+                    #     f"- Status: {res.status_code}"
+                    # )
+                    #logging.info(f"Push notification sent successfully to user {user.name} ({user.id}), status: {res.status_code}")
+                    sent_any = True
+                    break  # Stop after sending 1 notification to prevent duplicate popups
+                except WebPushException as exc:
+                    logging.error(f"Push failed for user {user.name} ({user.id}): {exc}")
+                    if exc.response is not None and exc.response.status_code in [404, 410]:
+                        db.delete(sub)
+                        db.commit()
+
+            # Log reminder dispatch in notifications_log only if push was delivered
+            if sent_any:
+                # print(f"📝 Creating NotificationLog for {user.name}")
+                db.add(NotificationLog(
+                    user_id=user.id,
+                    type="checkin_reminder",
+                    status="sent",
+                    sent_at=now,
+                    payload={"preferred_time": pref_str}
+                ))
+                db.commit()
+
+                # print(f"✅ NotificationLog saved for {user.name}")
+    finally:
+        db.close()
+
+
+        
+        
+
+    

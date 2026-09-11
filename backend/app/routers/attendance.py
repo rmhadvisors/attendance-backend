@@ -461,7 +461,7 @@ def checkout(
             CompOffTransaction.type == "earned"
         ).first()
 
-        old_amount = txn.amount if txn else 0.0
+        old_amount = float(txn.amount) if txn else 0.0
         diff = amount_earned - old_amount
         balance.days_earned = float(balance.days_earned or 0) + diff
 
@@ -760,7 +760,7 @@ def override_attendance(
             db.add(balance)
             db.flush()
 
-        old_amount = txn.amount if txn else 0.0
+        old_amount = float(txn.amount) if txn else 0.0
         diff = amount_earned - old_amount
         balance.days_earned = float(balance.days_earned or 0.0) + diff
 

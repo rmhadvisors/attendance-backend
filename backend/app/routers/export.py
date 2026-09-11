@@ -26,6 +26,17 @@ router = APIRouter(
 )
 
 
+def format_time_display(dt_val):
+    if not dt_val:
+        return "-"
+    if isinstance(dt_val, str):
+        try:
+            dt_val = datetime.fromisoformat(dt_val)
+        except Exception:
+            return dt_val
+    return dt_val.strftime("%I:%M %p")
+
+
 def style_worksheet(ws):
     # Enable gridlines
     ws.views.sheetView[0].showGridLines = True
@@ -35,8 +46,8 @@ def style_worksheet(ws):
     data_font = Font(name="Calibri", size=10)
 
     # Fills
-    header_fill = PatternFill(start_color="0F5132", end_color="0F5132", fill_type="solid") # Dark green
-    zebra_fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid") # Off-white
+    header_fill = PatternFill(start_color="0F5132", end_color="0F5132", fill_type="solid")  # Dark green
+    zebra_fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")    # Off-white
     
     # Borders
     thin_border = Border(
@@ -73,11 +84,12 @@ def style_worksheet(ws):
             header_val = (ws.cell(row=1, column=col_num).value or "").lower()
             
             # Alignments based on headers
-            if any(term in header_val for term in ["date", "id", "time", "status", "policy"]):
+            if any(term in header_val for term in ["date", "day", "id", "time", "status", "policy"]):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-            elif any(term in header_val for term in ["days", "hours", "count", "holidays", "present", "full", "half", "absent"]):
+            elif any(term in header_val for term in ["days", "hours", "count", "holidays", "present", "full", "half", "absent", "working", "target"]):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-                cell.number_format = "0.0"
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "0.0"
             elif "salary" in header_val or "payout" in header_val:
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 cell.number_format = "₹#,##0.00"
@@ -94,7 +106,7 @@ def style_worksheet(ws):
             if "salary" in header_val or "payout" in header_val:
                 val_str = "₹" + val_str + ".00"
             max_length = max(max_length, len(val_str))
-        ws.column_dimensions[column_letter].width = max(max_length, 12) + 3
+        ws.column_dimensions[column_letter].width = max(max_length, 12) + 4
 
 
 @router.get("/attendance/xlsx")
@@ -161,6 +173,7 @@ def export_attendance_excel(
 
     # Fetch targeted employees
     emp_query = db.query(User).filter(User.email != "admin@glrattendance.com")
+    is_individual = False
     if employee_id:
         from uuid import UUID
         is_uuid = False
@@ -174,9 +187,14 @@ def export_attendance_excel(
             emp_query = emp_query.filter((User.employee_id == employee_id) | (User.id == employee_id))
         else:
             emp_query = emp_query.filter(User.employee_id == employee_id)
+        is_individual = True
     
     employees = emp_query.order_by(User.name).all()
+    if len(employees) == 1:
+        is_individual = True
+
     summary_rows = []
+    daily_rows = []
 
     for emp in employees:
         logs = db.query(AttendanceLog).filter(
@@ -204,6 +222,73 @@ def export_attendance_excel(
             )
             log = log_by_date.get(d)
 
+            # Daily status determination
+            if log:
+                if log.day_status == "full_day":
+                    day_status_display = "Full Day"
+                elif log.day_status == "half_day":
+                    day_status_display = "Half Day"
+                elif log.day_status == "holiday_work":
+                    day_status_display = "Holiday Work"
+                elif log.day_status == "absent":
+                    day_status_display = "Absent"
+                elif log.day_status == "comp_off_leave":
+                    day_status_display = "Comp Off Leave"
+                elif log.checkin_time:
+                    day_status_display = "Present"
+                else:
+                    day_status_display = "Absent"
+            else:
+                if d in holiday_dates:
+                    hol_obj = next((h for h in holidays_in_range if h.date == d), None)
+                    day_status_display = f"Holiday ({hol_obj.name})" if hol_obj else "Holiday"
+                elif not is_expected_work:
+                    day_status_display = "Weekly Off"
+                elif d <= today:
+                    day_status_display = "Absent"
+                else:
+                    day_status_display = "Upcoming"
+
+            # Check-in and Check-out times
+            checkin_time_str = format_time_display(log.checkin_time) if (log and log.checkin_time) else "-"
+            checkout_time_str = format_time_display(log.checkout_time) if (log and log.checkout_time) else "-"
+            total_hours_val = round(log.total_hours, 2) if (log and log.total_hours is not None) else 0.0
+            checkin_status_str = log.checkin_status.replace('_', ' ').title() if (log and log.checkin_status) else "-"
+            checkout_status_str = log.checkout_status.replace('_', ' ').title() if (log and log.checkout_status) else "-"
+
+            # Notes
+            notes_list = []
+            if log:
+                if log.checkin_note:
+                    notes_list.append(f"In: {log.checkin_note}")
+                if log.checkout_note:
+                    notes_list.append(f"Out: {log.checkout_note}")
+                if log.override_note:
+                    notes_list.append(f"Override: {log.override_note}")
+            notes_str = "; ".join(notes_list) if notes_list else "-"
+
+            daily_entry = {
+                "Date": d.strftime("%Y-%m-%d"),
+                "Day": d.strftime("%A"),
+                "Status": day_status_display,
+                "Check-In Time": checkin_time_str,
+                "Check-Out Time": checkout_time_str,
+                "Total Hours": total_hours_val,
+                "Check-In Status": checkin_status_str,
+                "Check-Out Status": checkout_status_str,
+                "Notes": notes_str
+            }
+
+            if not is_individual:
+                daily_entry = {
+                    "Employee Name": emp.name,
+                    "Employee ID": emp.employee_id or "-",
+                    **daily_entry
+                }
+
+            daily_rows.append(daily_entry)
+
+            # Aggregate calculations
             if is_expected_work:
                 expected_working_days += 1.0
                 target = 7.0 if (d.weekday() == 5 and user_policy == "all_sat_half_day") else 9.0
@@ -254,40 +339,59 @@ def export_attendance_excel(
         total_hours_worked = sum(log.total_hours or 0.0 for log in logs)
 
         summary_rows.append({
-            "name": emp.name,
-            "total no of days": expected_working_days,
-            "total target hours": target_hours,
-            "no of days present": full_days_count + half_days_count,
-            "no of days full day": full_days_count,
-            "half day": half_days_count,
-            "absent": absent_days,
-            "no. holidays in month": holidays_count,
-            "total hours worked": round(total_hours_worked, 2),
-            "total salary calculated": round(calculated_salary, 2)
+            "Employee Name": emp.name,
+            "Employee ID": emp.employee_id or "-",
+            "Total Working Days": expected_working_days,
+            "Target Hours": target_hours,
+            "Days Present": full_days_count + half_days_count,
+            "Full Days": full_days_count,
+            "Half Days": half_days_count,
+            "Absent Days": absent_days,
+            "Holidays": holidays_count,
+            "Total Hours Worked": round(total_hours_worked, 2),
+            "Calculated Salary": round(calculated_salary, 2)
         })
 
-    df = pd.DataFrame(summary_rows)
-    if df.empty:
-        df = pd.DataFrame(columns=[
-            "name",
-            "total no of days",
-            "total target hours",
-            "no of days present",
-            "no of days full day",
-            "half day",
-            "absent",
-            "no. holidays in month",
-            "total hours worked",
-            "total salary calculated"
+    df_summary = pd.DataFrame(summary_rows)
+    if df_summary.empty:
+        df_summary = pd.DataFrame(columns=[
+            "Employee Name",
+            "Employee ID",
+            "Total Working Days",
+            "Target Hours",
+            "Days Present",
+            "Full Days",
+            "Half Days",
+            "Absent Days",
+            "Holidays",
+            "Total Hours Worked",
+            "Calculated Salary"
         ])
+
+    df_daily = pd.DataFrame(daily_rows)
+    if df_daily.empty:
+        daily_cols = ["Date", "Day", "Status", "Check-In Time", "Check-Out Time", "Total Hours", "Check-In Status", "Check-Out Status", "Notes"]
+        if not is_individual:
+            daily_cols = ["Employee Name", "Employee ID"] + daily_cols
+        df_daily = pd.DataFrame(columns=daily_cols)
 
     os.makedirs("exports", exist_ok=True)
     file_name = f"attendance_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
     file_path = os.path.join("exports", file_name)
 
     with pd.ExcelWriter(file_path, engine="openpyxl") as writer:
-        df.to_excel(writer, index=False, sheet_name="Attendance Summary")
-        style_worksheet(writer.sheets["Attendance Summary"])
+        if is_individual:
+            # For individual reports, place the detailed Daily Attendance sheet first
+            df_daily.to_excel(writer, index=False, sheet_name="Daily Attendance")
+            style_worksheet(writer.sheets["Daily Attendance"])
+            df_summary.to_excel(writer, index=False, sheet_name="Attendance Summary")
+            style_worksheet(writer.sheets["Attendance Summary"])
+        else:
+            # For multi-employee reports, place summary first, then daily breakdown
+            df_summary.to_excel(writer, index=False, sheet_name="Attendance Summary")
+            style_worksheet(writer.sheets["Attendance Summary"])
+            df_daily.to_excel(writer, index=False, sheet_name="Daily Attendance")
+            style_worksheet(writer.sheets["Daily Attendance"])
 
     return FileResponse(
         path=file_path,

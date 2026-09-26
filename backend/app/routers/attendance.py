@@ -452,7 +452,7 @@ def checkout(
         
         # For comp-off work hours requirement
         expected_full_hours = 6.5 if (today.weekday() == 5 and current_user.saturday_policy == "all_sat_half_day") else 8.5
-        amount_earned = 1.0 if total_hours >= expected_full_hours else (0.5 if total_hours >= 4.5 else 0.0)
+        amount_earned = 1.0 if total_hours >= expected_full_hours else (0.5 if total_hours >= 5.0 else 0.0)
         
         # Update existing earned txn if any, to avoid duplication across checkins/checkouts
         txn = db.query(CompOffTransaction).filter(
@@ -467,14 +467,14 @@ def checkout(
 
         if txn:
             txn.amount = amount_earned
-            txn.notes = f"Worked {'full' if total_hours >= expected_full_hours else 'half' if total_hours >= 4.5 else 'zero'} day ({total_hours} hrs) on a holiday/weekend"
+            txn.notes = f"Worked {'full' if total_hours >= expected_full_hours else 'half' if total_hours >= 5.0 else 'zero'} day ({total_hours} hrs) on a holiday/weekend"
         else:
             txn = CompOffTransaction(
                 user_id=current_user.id,
                 type="earned",
                 amount=amount_earned,
                 reference_date=today,
-                notes=f"Worked {'full' if total_hours >= expected_full_hours else 'half' if total_hours >= 4.5 else 'zero'} day ({total_hours} hrs) on a holiday/weekend"
+                notes=f"Worked {'full' if total_hours >= expected_full_hours else 'half' if total_hours >= 5.0 else 'zero'} day ({total_hours} hrs) on a holiday/weekend"
             )
             db.add(txn)
     else:
@@ -482,7 +482,7 @@ def checkout(
         expected_full_hours = 6.5 if (today.weekday() == 5 and current_user.saturday_policy == "all_sat_half_day") else 8.5
         if total_hours >= expected_full_hours:
             attendance.day_status = "full_day"
-        elif total_hours >= 4.5:
+        elif total_hours >= 5.0:
             attendance.day_status = "half_day"
         else:
             attendance.day_status = "absent"
@@ -731,7 +731,7 @@ def override_attendance(
                 else:
                     if total_hours >= expected_full_hours:
                         attendance.day_status = "full_day"
-                    elif total_hours >= 4.5:
+                    elif total_hours >= 5.0:
                         attendance.day_status = "half_day"
                     else:
                         attendance.day_status = "absent"
@@ -752,7 +752,7 @@ def override_attendance(
 
     if attendance.day_status == "holiday_work" and attendance.checkin_time:
         # User is eligible for comp-off
-        amount_earned = 1.0 if attendance.total_hours >= expected_full_hours else (0.5 if attendance.total_hours >= 4.5 else 0.0)
+        amount_earned = 1.0 if attendance.total_hours >= expected_full_hours else (0.5 if attendance.total_hours >= 5.0 else 0.0)
         
         balance = db.query(CompOffBalance).filter(CompOffBalance.user_id == attendance.user_id).first()
         if not balance:

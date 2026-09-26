@@ -9,7 +9,7 @@ import os
 from app.core.database import SessionLocal
 from app.utils.timezone import now_ist, today_ist, IST
 from app.models.user import User
-from app.models.attendance import AttendanceLog
+from app.models.attendance import AttendanceLog, AttendanceInterval
 from app.models.notification import NotificationLog, PushSubscription
 from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
@@ -201,7 +201,38 @@ def check_and_send_reminders():
         db.close()
 
 
-        
-        
+def auto_close_unclosed_attendance():
+    """
+    Runs at end-of-day (23:50 IST).
+    Finds employees who checked in today (or earlier) but forgot to check out,
+    and automatically marks them as 'half_day' with 5.0 hours.
+    """
+    today = today_ist()
+    db: Session = SessionLocal()
+    try:
+        unclosed_logs = db.query(AttendanceLog).filter(
+            AttendanceLog.date <= today,
+            AttendanceLog.checkin_time != None,
+            AttendanceLog.checkout_time == None,
+            AttendanceLog.day_status == "present"
+        ).all()
 
-    
+        now = now_ist()
+        for log in unclosed_logs:
+            log.day_status = "half_day"
+            log.total_hours = 5.0
+            log.checkout_status = "missing_checkout"
+
+            # Close any open session interval
+            active_intervals = db.query(AttendanceInterval).filter(
+                AttendanceInterval.attendance_log_id == log.id,
+                AttendanceInterval.checkout_time == None
+            ).all()
+            for interval in active_intervals:
+                interval.checkout_time = now
+                interval.duration_hours = 5.0
+
+        if unclosed_logs:
+            db.commit()
+    finally:
+        db.close()

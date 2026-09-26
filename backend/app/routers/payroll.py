@@ -154,37 +154,44 @@ def get_payroll_summary(
             )
 
             log = log_by_date.get(d)
-            if is_expected_working_day:
-                if log:
-                    if log.day_status in ["full_day", "holiday_work"]:
+            if log:
+                # Fallback: if employee checked in on a past day but forgot to check out, treat as half_day (5h)
+                log_day_status = log.day_status
+                log_total_hours = log.total_hours
+                if d < current_date_ist and log.checkin_time is not None and log.checkout_time is None:
+                    log_day_status = "half_day"
+                    if log_total_hours is None or log_total_hours == 0.0:
+                        log_total_hours = 5.0
+
+                if is_expected_working_day:
+                    if log_day_status in ["full_day", "holiday_work"]:
                         worked_days += 1.0
-                    elif log.day_status == "half_day":
+                    elif log_day_status == "half_day":
                         worked_days += 0.5
                         total_deductions += 0.5
-                    elif log.day_status == "comp_off_leave":
+                    elif log_day_status == "comp_off_leave":
                         paid_leaves += 1.0
-                    elif log.day_status == "absent":
+                    elif log_day_status == "absent":
                         total_deductions += 1.0
 
                     # Overtime hours calculation on expected working days
-                    if log.total_hours is not None:
+                    if log_total_hours is not None:
                         target = 7.0 if (d.weekday() == 5 and user_policy == "all_sat_half_day") else 9.0
-                        overtime_hours += max(0.0, log.total_hours - target)
+                        overtime_hours += max(0.0, log_total_hours - target)
                 else:
-                    # No log on an expected working day is considered absent (only for past or current days)
-                    if d <= current_date_ist:
-                        total_deductions += 1.0
-            else:
-                # Holiday or Weekend
-                if log:
-                    if log.day_status in ["full_day", "holiday_work"]:
+                    # Holiday or Weekend
+                    if log_day_status in ["full_day", "holiday_work"]:
                         worked_days += 1.0
                         extra_days_worked += 1.0
-                    elif log.day_status == "half_day":
+                    elif log_day_status == "half_day":
                         worked_days += 0.5
                         extra_days_worked += 0.5
-                    elif log.day_status == "comp_off_leave":
+                    elif log_day_status == "comp_off_leave":
                         paid_leaves += 1.0
+            else:
+                # No log on an expected working day is considered absent (only for past or current days)
+                if is_expected_working_day and d <= current_date_ist:
+                    total_deductions += 1.0
 
         # Fixed 30 days billing: paid days is 30 - deductions + extra days worked + overtime days (9 hours = 1 day)
         overtime_days = overtime_hours / 9.0
@@ -195,7 +202,10 @@ def get_payroll_summary(
         if base_salary > 0:
             calculated_salary = ((base_salary / 30.0) * total_paid_days) * 0.99 # 1% TDS deduction
 
-        total_hours_worked = sum(log.total_hours or 0.0 for log in logs)
+        total_hours_worked = sum(
+            5.0 if (log.date < current_date_ist and log.checkin_time is not None and log.checkout_time is None) else (log.total_hours or 0.0)
+            for log in logs
+        )
         total_days_present = sum(1 for log in logs if log.checkin_time is not None and log.day_status != "absent")
 
         payroll_records.append({
@@ -350,37 +360,44 @@ def get_my_pay_slip(
         )
 
         log = log_by_date.get(d)
-        if is_expected_working_day:
-            if log:
-                if log.day_status in ["full_day", "holiday_work"]:
+        if log:
+            # Fallback: if employee checked in on a past day but forgot to check out, treat as half_day (5h)
+            log_day_status = log.day_status
+            log_total_hours = log.total_hours
+            if d < current_date_ist and log.checkin_time is not None and log.checkout_time is None:
+                log_day_status = "half_day"
+                if log_total_hours is None or log_total_hours == 0.0:
+                    log_total_hours = 5.0
+
+            if is_expected_working_day:
+                if log_day_status in ["full_day", "holiday_work"]:
                     worked_days += 1.0
-                elif log.day_status == "half_day":
+                elif log_day_status == "half_day":
                     worked_days += 0.5
                     total_deductions += 0.5
-                elif log.day_status == "comp_off_leave":
+                elif log_day_status == "comp_off_leave":
                     paid_leaves += 1.0
-                elif log.day_status == "absent":
+                elif log_day_status == "absent":
                     total_deductions += 1.0
 
                 # Overtime hours calculation on expected working days
-                if log.total_hours is not None:
+                if log_total_hours is not None:
                     target = 7.0 if (d.weekday() == 5 and user_policy == "all_sat_half_day") else 9.0
-                    overtime_hours += max(0.0, log.total_hours - target)
+                    overtime_hours += max(0.0, log_total_hours - target)
             else:
-                # No log on an expected working day is considered absent (only for past or current days)
-                if d <= current_date_ist:
-                    total_deductions += 1.0
-        else:
-            # Holiday or Weekend
-            if log:
-                if log.day_status in ["full_day", "holiday_work"]:
+                # Holiday or Weekend
+                if log_day_status in ["full_day", "holiday_work"]:
                     worked_days += 1.0
                     extra_days_worked += 1.0
-                elif log.day_status == "half_day":
+                elif log_day_status == "half_day":
                     worked_days += 0.5
                     extra_days_worked += 0.5
-                elif log.day_status == "comp_off_leave":
+                elif log_day_status == "comp_off_leave":
                     paid_leaves += 1.0
+        else:
+            # No log on an expected working day is considered absent (only for past or current days)
+            if is_expected_working_day and d <= current_date_ist:
+                total_deductions += 1.0
 
     # Fixed 30 days billing: paid days is 30 - deductions + extra days worked + overtime days (9 hours = 1 day)
     overtime_days = overtime_hours / 9.0
@@ -391,7 +408,10 @@ def get_my_pay_slip(
     if base_salary > 0:
         calculated_salary = ((base_salary / 30.0) * total_paid_days) * 0.99 # 1% TDS deduction
 
-    total_hours_worked = sum(log.total_hours or 0.0 for log in logs)
+    total_hours_worked = sum(
+        5.0 if (log.date < current_date_ist and log.checkin_time is not None and log.checkout_time is None) else (log.total_hours or 0.0)
+        for log in logs
+    )
     total_days_present = sum(1 for log in logs if log.checkin_time is not None and log.day_status != "absent")
 
     return {

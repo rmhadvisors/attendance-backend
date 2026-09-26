@@ -103,10 +103,14 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
 
             log = log_by_date.get(d)
             if log:
-                if log.day_status == "half_day":
+                log_status = log.day_status
+                if d < current_date_ist and log.checkin_time is not None and log.checkout_time is None:
+                    log_status = "half_day"
+
+                if log_status == "half_day":
                     if is_expected_working_day:
                         total_deductions += 0.5
-                elif log.day_status == "absent":
+                elif log_status == "absent":
                     if is_expected_working_day:
                         total_deductions += 1.0
             else:
@@ -128,10 +132,16 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
 
         log = log_by_date.get(d)
         if log:
-            if log.day_status in ["full_day", "holiday_work", "comp_off_leave", "present"]:
+            log_status = log.day_status
+            if d < current_date_ist and log.checkin_time is not None and log.checkout_time is None:
+                log_status = "half_day"
+
+            if log_status in ["full_day", "holiday_work", "comp_off_leave"]:
                 accrued_days += 1.0
-            elif log.day_status == "half_day":
+            elif log_status == "half_day":
                 accrued_days += 0.5
+            elif log_status == "present":
+                accrued_days += 1.0
         else:
             # Weekend or Holiday or Configured non-working day is paid and counts as working
             if is_sun or is_hol or not is_work_configured:
@@ -211,14 +221,24 @@ def get_employee_stats(
         AttendanceLog.date <= date(q_year, q_month, num_days)
     ).all()
 
-    monthly_hours = sum(log.total_hours or 0.0 for log in monthly_logs)
+    def get_effective_log(log):
+        status = log.day_status
+        hours = log.total_hours or 0.0
+        if log.date < today and log.checkin_time is not None and log.checkout_time is None:
+            status = "half_day"
+            if hours == 0.0:
+                hours = 5.0
+        return status, hours
+
+    monthly_effective = [get_effective_log(log) for log in monthly_logs]
+    monthly_hours = sum(h for _, h in monthly_effective)
     
     # Calculate average hours per day (Option 1: scale Saturdays for half-day policy)
-    monthly_active_logs = [log for log in monthly_logs if log.total_hours and log.total_hours > 0.0]
+    monthly_active_logs = [log for log in monthly_logs if (log.total_hours and log.total_hours > 0.0) or (log.date < today and log.checkin_time is not None and log.checkout_time is None)]
     monthly_active_days_count = len(monthly_active_logs)
     monthly_scaled_hours = 0.0
     for log in monthly_logs:
-        log_hours = log.total_hours or 0.0
+        _, log_hours = get_effective_log(log)
         if log.date.weekday() == 5 and user.saturday_policy == "all_sat_half_day":
             log_hours = log_hours * (9.0 / 6.5)
         monthly_scaled_hours += log_hours
@@ -230,11 +250,11 @@ def get_employee_stats(
 
     # Breakdown of statuses in month
     breakdown = {
-        "full_day": len([log for log in monthly_logs if log.day_status == "full_day"]),
-        "half_day": len([log for log in monthly_logs if log.day_status == "half_day"]),
-        "holiday_work": len([log for log in monthly_logs if log.day_status == "holiday_work"]),
-        "comp_off_leave": len([log for log in monthly_logs if log.day_status == "comp_off_leave"]),
-        "present": len([log for log in monthly_logs if log.day_status == "present"])
+        "full_day": len([s for s, _ in monthly_effective if s == "full_day"]),
+        "half_day": len([s for s, _ in monthly_effective if s == "half_day"]),
+        "holiday_work": len([s for s, _ in monthly_effective if s == "holiday_work"]),
+        "comp_off_leave": len([s for s, _ in monthly_effective if s == "comp_off_leave"]),
+        "present": len([s for s, _ in monthly_effective if s == "present"])
     }
 
     # 4. Single day detail (if queried)

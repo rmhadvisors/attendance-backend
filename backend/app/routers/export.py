@@ -223,16 +223,23 @@ def export_attendance_excel(
             log = log_by_date.get(d)
 
             # Daily status determination
+            log_day_status = log.day_status if log else None
+            log_total_hours = log.total_hours if log else None
+            if log and d < today and log.checkin_time is not None and log.checkout_time is None:
+                log_day_status = "half_day"
+                if log_total_hours is None or log_total_hours == 0.0:
+                    log_total_hours = 5.0
+
             if log:
-                if log.day_status == "full_day":
+                if log_day_status == "full_day":
                     day_status_display = "Full Day"
-                elif log.day_status == "half_day":
+                elif log_day_status == "half_day":
                     day_status_display = "Half Day"
-                elif log.day_status == "holiday_work":
+                elif log_day_status == "holiday_work":
                     day_status_display = "Holiday Work"
-                elif log.day_status == "absent":
+                elif log_day_status == "absent":
                     day_status_display = "Absent"
-                elif log.day_status == "comp_off_leave":
+                elif log_day_status == "comp_off_leave":
                     day_status_display = "Comp Off Leave"
                 elif log.checkin_time:
                     day_status_display = "Present"
@@ -252,7 +259,7 @@ def export_attendance_excel(
             # Check-in and Check-out times
             checkin_time_str = format_time_display(log.checkin_time) if (log and log.checkin_time) else "-"
             checkout_time_str = format_time_display(log.checkout_time) if (log and log.checkout_time) else "-"
-            total_hours_val = round(log.total_hours, 2) if (log and log.total_hours is not None) else 0.0
+            total_hours_val = round(log_total_hours, 2) if (log and log_total_hours is not None) else 0.0
             checkin_status_str = log.checkin_status.replace('_', ' ').title() if (log and log.checkin_status) else "-"
             checkout_status_str = log.checkout_status.replace('_', ' ').title() if (log and log.checkout_status) else "-"
 
@@ -295,20 +302,20 @@ def export_attendance_excel(
                 target_hours += target
 
                 if log:
-                    if log.day_status in ["full_day", "holiday_work"]:
+                    if log_day_status in ["full_day", "holiday_work"]:
                         worked_days += 1.0
                         full_days_count += 1
-                    elif log.day_status == "half_day":
+                    elif log_day_status == "half_day":
                         worked_days += 0.5
                         total_deductions += 0.5
                         half_days_count += 1
-                    elif log.day_status == "absent":
+                    elif log_day_status == "absent":
                         total_deductions += 1.0
                         absent_days += 1.0
 
                     # Overtime hours calculation on expected working days
-                    if log.total_hours is not None:
-                        overtime_hours += max(0.0, log.total_hours - target)
+                    if log_total_hours is not None:
+                        overtime_hours += max(0.0, log_total_hours - target)
                 else:
                     if d <= today:
                         total_deductions += 1.0
@@ -316,11 +323,11 @@ def export_attendance_excel(
             else:
                 holidays_count += 1
                 if log:
-                    if log.day_status in ["full_day", "holiday_work"]:
+                    if log_day_status in ["full_day", "holiday_work"]:
                         worked_days += 1.0
                         extra_days_worked += 1.0
                         full_days_count += 1
-                    elif log.day_status == "half_day":
+                    elif log_day_status == "half_day":
                         worked_days += 0.5
                         extra_days_worked += 0.5
                         half_days_count += 1
@@ -336,7 +343,10 @@ def export_attendance_excel(
         if base_salary > 0:
             calculated_salary = ((base_salary / 30.0) * total_paid_days) * 0.99
 
-        total_hours_worked = sum(log.total_hours or 0.0 for log in logs)
+        total_hours_worked = sum(
+            5.0 if (log.date < today and log.checkin_time is not None and log.checkout_time is None) else (log.total_hours or 0.0)
+            for log in logs
+        )
 
         summary_rows.append({
             "Employee Name": emp.name,

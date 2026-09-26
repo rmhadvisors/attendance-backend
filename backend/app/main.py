@@ -2,7 +2,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import os
 from apscheduler.schedulers.background import BackgroundScheduler
-from app.services.reminder_scheduler import check_and_send_reminders
+from app.services.reminder_scheduler import check_and_send_reminders, auto_close_unclosed_attendance
 
 from app.core.database import engine, Base
 
@@ -53,6 +53,16 @@ async def lifespan(app: FastAPI):
             hour=REMINDER_WINDOW_HOURS,
             minute=REMINDER_INTERVAL_MINUTES,
             id="checkin_reminders",
+            replace_existing=True,
+            max_instances=1,
+            timezone=IST
+        )
+        scheduler.add_job(
+            auto_close_unclosed_attendance,
+            'cron',
+            hour=23,
+            minute=50,
+            id="auto_close_attendance",
             replace_existing=True,
             max_instances=1,
             timezone=IST

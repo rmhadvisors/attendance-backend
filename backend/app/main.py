@@ -34,13 +34,29 @@ Base.metadata.create_all(bind=engine)
 #         print("Safe migration skipped or error:", e)
 
 from contextlib import asynccontextmanager
+from app.utils.timezone import IST
 
-scheduler = BackgroundScheduler()
+# Check-in window configuration (actual check-in 8am-12pm + 30m buffer -> 8:00-12:55 IST Mon-Sat)
+REMINDER_WINDOW_DAYS = os.getenv("REMINDER_WINDOW_DAYS", "mon-sat")
+REMINDER_WINDOW_HOURS = os.getenv("REMINDER_WINDOW_HOURS", "8-12")
+REMINDER_INTERVAL_MINUTES = os.getenv("REMINDER_INTERVAL_MINUTES", "*/5")
+
+scheduler = BackgroundScheduler(timezone=IST)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     if not scheduler.running:
-        scheduler.add_job(check_and_send_reminders, 'cron', minute='*')
+        scheduler.add_job(
+            check_and_send_reminders,
+            'cron',
+            day_of_week=REMINDER_WINDOW_DAYS,
+            hour=REMINDER_WINDOW_HOURS,
+            minute=REMINDER_INTERVAL_MINUTES,
+            id="checkin_reminders",
+            replace_existing=True,
+            max_instances=1,
+            timezone=IST
+        )
         scheduler.start()
     yield
     if scheduler.running:

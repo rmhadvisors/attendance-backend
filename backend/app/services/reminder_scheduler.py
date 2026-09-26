@@ -1,26 +1,23 @@
-from app.core import database
-from app.core import database
 from datetime import datetime, timedelta
 import logging
 from sqlalchemy.orm import Session
 from pywebpush import webpush, WebPushException
 import json
 from urllib.parse import urlparse
+import os
 
 from app.core.database import SessionLocal
-from app.utils.timezone import now_ist, today_ist
+from app.utils.timezone import now_ist, today_ist, IST
 from app.models.user import User
 from app.models.attendance import AttendanceLog
 from app.models.notification import NotificationLog, PushSubscription
 from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
 from app.routers.attendance import is_user_expected_working_day
-import os
 
 VAPID_PRIVATE_KEY = os.getenv("VAPID_PRIVATE_KEY", "9T4SHbsYgUO4pbpk5_SkqPuvuIZBBPohBXML1VSAmOE")
-#VAPID_CLAIMS = {"sub": "mailto:admin@glrattendance.com"}
 
-def calculate_target_time(preferred_time_str:str) -> str:
+def calculate_target_time(preferred_time_str: str) -> str:
     """Adds 30 minutes to 'HH:MM' string (e.g. '09:00' -> '09:30')"""
     try:
         t = datetime.strptime(preferred_time_str, '%H:%M')
@@ -30,15 +27,20 @@ def calculate_target_time(preferred_time_str:str) -> str:
         return ""
 
 def check_and_send_reminders():
+    now = now_ist()
+    today = today_ist()
+
+    # 1. Non-DB check: Exclude Sundays immediately without opening a database session
+    if today.weekday() == 6:
+        return
+
+    # 2. Non-DB check: Avoid opening a DB session if outside check-in reminder hours (08:00 - 13:00 IST)
+    if now.hour < 8 or now.hour > 13:
+        return
+
     db: Session = SessionLocal()
     try:
-        now = now_ist()
-        today = today_ist()
-        # 1. Exclude Sundays (weekday 6 is Sunday)
-        if today.weekday() == 6:
-            return
-        current_time_str = now.strftime("%H:%M")
-        # 2. Get holidays and working days map for Saturday check
+        # 3. Get holidays and working days map for Saturday check
         holiday = db.query(Holiday).filter(Holiday.date == today).first()
         working_days = db.query(WorkingDaysConfig).first()
         days_map = [True, True, True, True, True, True, False]
@@ -48,11 +50,15 @@ def check_and_send_reminders():
                 working_days.thursday, working_days.friday, working_days.saturday,
                 working_days.sunday
             ]
-        # 3. Query all users with reminders enabled
+
+        # 4. Query active users with reminders enabled
         users = db.query(User).filter(
             User.is_active == True,
             User.enable_checkin_reminder == True
         ).all()
+
+        if not users:
+            return
         for user in users:
             # print(
             #     f"\n========== CHECKING USER: {user.name} ({user.id}) =========="
@@ -161,8 +167,9 @@ def check_and_send_reminders():
                         vapid_claims={
                             "sub": "mailto:admin@glrattendance.com",
                             "aud": audience
-                            },
-                        ttl=60
+                        },
+                        ttl=86400,
+                        headers={"Urgency": "high"}
                     )
                     # print(
                     #     f"✅ PUSH SENT to {user.name} "

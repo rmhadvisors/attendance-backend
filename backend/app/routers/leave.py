@@ -44,13 +44,15 @@ def request_leave(
     if days_requested <= 0:
         raise HTTPException(status_code=400, detail="Invalid date range")
 
-    # Allow request even with 0 comp-off balance; the balance will be managed during approval.
-    pass
+    if data.leave_type != "full_day" and data.start_date != data.end_date:
+        raise HTTPException(status_code=400, detail="Half-day leave must be for a single date")
 
+    # Allow request even with 0 comp-off balance; the balance will be managed during approval.
     leave = LeaveRequest(
         user_id=current_user.id,
         start_date=data.start_date,
         end_date=data.end_date,
+        leave_type=data.leave_type,
         reason=data.reason,
         status="pending"
     )
@@ -64,6 +66,7 @@ def request_leave(
         "employee_name": current_user.name,
         "start_date": leave.start_date,
         "end_date": leave.end_date,
+        "leave_type": leave.leave_type,
         "status": leave.status,
         "reason": leave.reason,
         "admin_notes": leave.admin_notes
@@ -83,6 +86,7 @@ def get_my_requests(
             "employee_name": current_user.name,
             "start_date": r.start_date,
             "end_date": r.end_date,
+            "leave_type": r.leave_type,
             "status": r.status,
             "reason": r.reason,
             "admin_notes": r.admin_notes
@@ -103,6 +107,7 @@ def get_all_requests(
             "employee_name": r.User.name,
             "start_date": r.LeaveRequest.start_date,
             "end_date": r.LeaveRequest.end_date,
+            "leave_type": r.LeaveRequest.leave_type,
             "status": r.LeaveRequest.status,
             "reason": r.LeaveRequest.reason,
             "admin_notes": r.LeaveRequest.admin_notes
@@ -134,7 +139,7 @@ def action_leave(
 
     # If approved, deduct from balance if available
     if data.action == "approve":
-        days_requested = (leave.end_date - leave.start_date).days + 1
+        days_requested = 0.5 if leave.leave_type in ("first_half", "second_half") else (leave.end_date - leave.start_date).days + 1
         balance = db.query(CompOffBalance).filter(CompOffBalance.user_id == leave.user_id).first()
         if not balance:
             balance = CompOffBalance(user_id=leave.user_id)
@@ -168,6 +173,7 @@ def action_leave(
         "employee_name": user.name,
         "start_date": leave.start_date,
         "end_date": leave.end_date,
+        "leave_type": leave.leave_type,
         "status": leave.status,
         "reason": leave.reason,
         "admin_notes": leave.admin_notes

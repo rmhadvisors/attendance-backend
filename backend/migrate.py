@@ -60,6 +60,7 @@ add_column_if_missing("attendance_logs", "checkout_mood",        "VARCHAR(50)")
 add_column_if_missing("attendance_logs", "checkout_mood_note",   "TEXT")
 add_column_if_missing("users", "preferred_checkin_time", "VARCHAR(10)", "'09:00'")
 add_column_if_missing("users", "enable_checkin_reminder", "BOOLEAN", "TRUE")
+add_column_if_missing("leave_requests", "leave_type", "VARCHAR(20)", "'full_day'")
 
 
 print("\n-- attendance_intervals -----------------------------------")

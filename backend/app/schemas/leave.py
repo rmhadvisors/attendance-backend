@@ -1,12 +1,13 @@
 from pydantic import BaseModel
 from datetime import date
-from typing import Optional
+from typing import Optional, Literal
 from uuid import UUID
 
 class LeaveRequestCreate(BaseModel):
     start_date: date
     end_date: date
     reason: str
+    leave_type: Literal["full_day", "first_half", "second_half"] = "full_day"
 
 class LeaveRequestResponse(BaseModel):
     id: UUID
@@ -14,6 +15,7 @@ class LeaveRequestResponse(BaseModel):
     employee_name: str
     start_date: date
     end_date: date
+    leave_type: str = "full_day"
     status: str
     reason: str
     admin_notes: Optional[str] = None

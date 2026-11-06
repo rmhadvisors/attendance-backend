@@ -13,6 +13,8 @@ class LeaveRequest(Base):
     user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
+    # 'full_day' | 'first_half' | 'second_half' (halves only for a single date)
+    leave_type = Column(String(20), default="full_day", nullable=False, server_default="full_day")
     reason = Column(String(280), nullable=True)
     status = Column(String(20), default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)

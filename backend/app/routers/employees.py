@@ -1,3 +1,4 @@
+from datetime import date
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -54,7 +55,13 @@ def create_employee(
         phone=employee.phone,
         role=employee.role,
         saturday_policy=employee.saturday_policy or "alt_sat_holiday",
-        allow_remote_checkin=employee.allow_remote_checkin
+        allow_remote_checkin=employee.allow_remote_checkin,
+        date_of_joining=employee.date_of_joining,
+        department=employee.department or None,
+        designation=employee.designation or None,
+        reporting_manager=employee.reporting_manager or None,
+        shift_start=employee.shift_start or None,
+        shift_end=employee.shift_end or None
     )
 
     try:
@@ -90,6 +97,21 @@ def update_employee(
     if not user:
         raise HTTPException(status_code=404, detail="Employee not found")
 
+    if employee_data.employee_id is not None:
+        new_employee_id = employee_data.employee_id.strip()
+        if not new_employee_id:
+            raise HTTPException(status_code=400, detail="Employee ID cannot be empty")
+        if len(new_employee_id) > 50:
+            raise HTTPException(status_code=400, detail="Employee ID must be 50 characters or fewer")
+        if new_employee_id != user.employee_id:
+            clash = db.query(User).filter(
+                User.employee_id == new_employee_id,
+                User.id != user.id
+            ).first()
+            if clash:
+                raise HTTPException(status_code=400, detail="This Employee ID is already used by another employee")
+            user.employee_id = new_employee_id
+
     if employee_data.name is not None:
         user.name = employee_data.name
     if employee_data.email is not None:
@@ -104,6 +126,24 @@ def update_employee(
         user.base_salary = employee_data.base_salary
     if employee_data.allow_remote_checkin is not None:
         user.allow_remote_checkin = employee_data.allow_remote_checkin
+
+    fields_set = employee_data.model_fields_set
+    if "date_of_joining" in fields_set:
+        user.date_of_joining = employee_data.date_of_joining
+    if "date_of_exit" in fields_set:
+        user.date_of_exit = employee_data.date_of_exit
+
+    joined = user.date_of_joining or (date.fromisoformat(user.joining_date) if user.joining_date else None)
+    if user.date_of_exit and joined and user.date_of_exit < joined:
+        db.rollback()
+        raise HTTPException(status_code=400, detail="Date of exit cannot be before date of joining")
+    for field in ("department", "designation", "reporting_manager", "shift_start", "shift_end"):
+        if field in fields_set:
+            value = getattr(employee_data, field)
+            setattr(user, field, value.strip() or None if value else None)
+
+    if employee_data.new_password:
+        user.password_hash = hash_password(employee_data.new_password)
 
     try:
         db.commit()

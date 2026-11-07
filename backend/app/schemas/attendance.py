@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from datetime import datetime, date
 from typing import Optional
+from uuid import UUID
 
 
 class CheckInRequest(BaseModel):
@@ -24,6 +25,22 @@ class OverrideRequest(BaseModel):
     admin_note: Optional[str] = None
     checkin_time: Optional[datetime] = None
     checkout_time: Optional[datetime] = None
+
+
+class PaidLeaveRequest(BaseModel):
+    """Admin grants paid leave to an employee for one date or a date range."""
+    user_id: UUID
+    start_date: date
+    end_date: date
+    note: Optional[str] = None
+
+
+class RegularizeRequest(BaseModel):
+    """Employee self-service regularization of a past day."""
+    date: date
+    checkin_time: datetime
+    checkout_time: datetime
+    note: str
 
 
 class AttendanceResponse(BaseModel):

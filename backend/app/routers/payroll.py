@@ -3,7 +3,9 @@ from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from datetime import date, datetime
 import calendar
+import math
 from typing import Optional
+from uuid import UUID
 from pydantic import BaseModel
 
 from app.core.database import get_db
@@ -12,7 +14,7 @@ from app.models.user import User
 from app.models.attendance import AttendanceLog
 from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
-from app.models.payroll import MonthlySalary
+from app.models.payroll import MonthlySalary, PayrollAdjustment
 
 router = APIRouter(
     prefix="/payroll",
@@ -50,6 +52,63 @@ def is_user_expected_working_day(d: date, user_saturday_policy: str, holiday_dat
                 return True
         return False
     return days_map[d.weekday()]
+
+def get_joining_adjustment(user, year: int, month: int, num_days: int):
+    """Only days between joining and exit (inclusive) are payable.
+
+    Returns (join_date, exit_date, billing_days):
+      - join_date / exit_date are None when they do not limit this month
+      - billing_days is the fixed-30-day base: 30 for a full month, otherwise the number of
+        employed days in the month (capped at 30), and 0 if not employed at all that month
+    """
+    first = date(year, month, 1)
+    last = date(year, month, num_days)
+
+    joining = None
+    raw = getattr(user, "joining_date", None)
+    if raw:
+        try:
+            joining = date.fromisoformat(raw)
+        except ValueError:
+            joining = None
+    exit_date = getattr(user, "date_of_exit", None)
+
+    if (joining and joining > last) or (exit_date and exit_date < first):
+        return joining, exit_date, 0.0
+
+    start = joining if (joining and joining > first) else first
+    end = exit_date if (exit_date and exit_date < last) else last
+    if start == first and end == last:
+        return None, None, 30.0
+
+    billing_days = float(min(30, (end - start).days + 1))
+    return (joining if start != first else None), (exit_date if end != last else None), billing_days
+
+
+ADJUSTMENT_KINDS = ("addition", "deduction")
+MAX_ADJUSTMENT_AMOUNT = 10_000_000
+
+
+class AdjustmentCreate(BaseModel):
+    user_id: UUID
+    year: int
+    month: int
+    kind: str
+    amount: float
+    reason: str
+
+
+def get_adjustment_totals(db: Session, user_id, year: int, month: int):
+    """(total additions, total deductions) of manual adjustments for one employee-month."""
+    rows = db.query(PayrollAdjustment).filter(
+        PayrollAdjustment.user_id == user_id,
+        PayrollAdjustment.year == year,
+        PayrollAdjustment.month == month
+    ).all()
+    added = sum(r.amount for r in rows if r.kind == "addition")
+    deducted = sum(r.amount for r in rows if r.kind == "deduction")
+    return round(added, 2), round(deducted, 2)
+
 
 def get_employee_monthly_salary(db: Session, user_id: str, year: int, month: int, default_salary: float) -> float:
     # 1. Exact match
@@ -123,6 +182,19 @@ def get_payroll_summary(
     # Fetch all employees (everyone except the core system administrator)
     employees = db.query(User).filter(User.email != "admin@glrattendance.com").order_by(User.name).all()
 
+    month_adjustments = db.query(PayrollAdjustment).filter(
+        PayrollAdjustment.year == q_year,
+        PayrollAdjustment.month == q_month
+    ).all()
+    adjustment_totals = {}
+    for adj in month_adjustments:
+        added, deducted = adjustment_totals.get(adj.user_id, (0.0, 0.0))
+        if adj.kind == "addition":
+            added += adj.amount
+        else:
+            deducted += adj.amount
+        adjustment_totals[adj.user_id] = (added, deducted)
+
     payroll_records = []
     for emp in employees:
         # Fetch logs for this user in this month
@@ -141,9 +213,12 @@ def get_payroll_summary(
         overtime_hours = 0.0
 
         user_policy = emp.saturday_policy or "alt_sat_holiday"
+        join_date, exit_date, billing_days = get_joining_adjustment(emp, q_year, q_month, num_days)
 
         for day_num in range(1, num_days + 1):
             d = date(q_year, q_month, day_num)
+            if (join_date and d < join_date) or (exit_date and d > exit_date):
+                continue
             
             # Is it an expected working day?
             is_expected_working_day = is_user_expected_working_day(
@@ -193,14 +268,22 @@ def get_payroll_summary(
                 if is_expected_working_day and d <= current_date_ist:
                     total_deductions += 1.0
 
-        # Fixed 30 days billing: paid days is 30 - deductions + extra days worked + overtime days (9 hours = 1 day)
+        # Fixed 30 days billing: paid days is billing days (30, fewer for a mid-month joiner) - deductions + extra days worked + overtime days (9 hours = 1 day)
         overtime_days = overtime_hours / 9.0
-        total_paid_days = max(0.0, 30.0 - total_deductions + extra_days_worked + overtime_days)
+        # No work and no paid leave in the period => nothing is payable (week offs/holidays
+        # are not paid for an employee who never worked)
+        has_paid_attendance = worked_days > 0 or paid_leaves > 0 or any(l.day_status == "present" for l in logs)
+        total_paid_days = (
+            max(0.0, billing_days - total_deductions + extra_days_worked + overtime_days)
+            if has_paid_attendance else 0.0
+        )
         base_salary = get_employee_monthly_salary(db, emp.id, q_year, q_month, emp.base_salary)
 
         calculated_salary = 0.0
         if base_salary > 0:
-            calculated_salary = ((base_salary / 30.0) * total_paid_days) * 0.99 # 1% TDS deduction
+            calculated_salary = (base_salary / 30.0) * total_paid_days
+        adj_added, adj_deducted = adjustment_totals.get(emp.id, (0.0, 0.0))
+        net_salary = calculated_salary + adj_added - adj_deducted
 
         total_hours_worked = sum(
             5.0 if (log.date < current_date_ist and log.checkin_time is not None and log.checkout_time is None) else (log.total_hours or 0.0)
@@ -222,6 +305,9 @@ def get_payroll_summary(
             "extra_days_worked": extra_days_worked,
             "total_paid_days": total_paid_days,
             "calculated_salary": round(calculated_salary, 2),
+            "adjustments_added": round(adj_added, 2),
+            "adjustments_deducted": round(adj_deducted, 2),
+            "net_salary": round(net_salary, 2),
             "saturday_policy": user_policy
         })
 
@@ -347,9 +433,12 @@ def get_my_pay_slip(
     overtime_hours = 0.0
 
     user_policy = current_user.saturday_policy or "alt_sat_holiday"
+    join_date, exit_date, billing_days = get_joining_adjustment(current_user, q_year, q_month, num_days)
 
     for day_num in range(1, num_days + 1):
         d = date(q_year, q_month, day_num)
+        if (join_date and d < join_date) or (exit_date and d > exit_date):
+            continue
         
         # Is it an expected working day?
         is_expected_working_day = is_user_expected_working_day(
@@ -399,14 +488,27 @@ def get_my_pay_slip(
             if is_expected_working_day and d <= current_date_ist:
                 total_deductions += 1.0
 
-    # Fixed 30 days billing: paid days is 30 - deductions + extra days worked + overtime days (9 hours = 1 day)
+    # Fixed 30 days billing: paid days is billing days (30, fewer for a mid-month joiner) - deductions + extra days worked + overtime days (9 hours = 1 day)
     overtime_days = overtime_hours / 9.0
-    total_paid_days = max(0.0, 30.0 - total_deductions + extra_days_worked + overtime_days)
+    # No work and no paid leave in the period => nothing is payable
+    has_paid_attendance = worked_days > 0 or paid_leaves > 0 or any(l.day_status == "present" for l in logs)
+    total_paid_days = (
+        max(0.0, billing_days - total_deductions + extra_days_worked + overtime_days)
+        if has_paid_attendance else 0.0
+    )
     base_salary = get_employee_monthly_salary(db, current_user.id, q_year, q_month, current_user.base_salary)
 
     calculated_salary = 0.0
     if base_salary > 0:
-        calculated_salary = ((base_salary / 30.0) * total_paid_days) * 0.99 # 1% TDS deduction
+        calculated_salary = (base_salary / 30.0) * total_paid_days
+    my_adjustments = db.query(PayrollAdjustment).filter(
+        PayrollAdjustment.user_id == current_user.id,
+        PayrollAdjustment.year == q_year,
+        PayrollAdjustment.month == q_month
+    ).order_by(PayrollAdjustment.created_at).all()
+    adj_added = round(sum(a.amount for a in my_adjustments if a.kind == "addition"), 2)
+    adj_deducted = round(sum(a.amount for a in my_adjustments if a.kind == "deduction"), 2)
+    net_salary = calculated_salary + adj_added - adj_deducted
 
     total_hours_worked = sum(
         5.0 if (log.date < current_date_ist and log.checkin_time is not None and log.checkout_time is None) else (log.total_hours or 0.0)
@@ -426,5 +528,91 @@ def get_my_pay_slip(
         "extra_days_worked": extra_days_worked,
         "total_paid_days": total_paid_days,
         "calculated_salary": round(calculated_salary, 2),
+        "adjustments_added": adj_added,
+        "adjustments_deducted": adj_deducted,
+        "net_salary": round(net_salary, 2),
+        "adjustments": [
+            {"kind": a.kind, "amount": a.amount, "reason": a.reason}
+            for a in my_adjustments
+        ],
         "saturday_policy": user_policy
     }
+
+
+def _adjustment_dict(a: PayrollAdjustment):
+    return {
+        "id": str(a.id),
+        "kind": a.kind,
+        "amount": a.amount,
+        "reason": a.reason,
+        "created_at": a.created_at
+    }
+
+
+@router.get("/adjustments")
+def list_adjustments(
+    user_id: UUID,
+    year: int,
+    month: int,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    rows = db.query(PayrollAdjustment).filter(
+        PayrollAdjustment.user_id == user_id,
+        PayrollAdjustment.year == year,
+        PayrollAdjustment.month == month
+    ).order_by(PayrollAdjustment.created_at).all()
+    return [_adjustment_dict(a) for a in rows]
+
+
+@router.post("/adjustments")
+def add_adjustment(
+    payload: AdjustmentCreate,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    if payload.kind not in ADJUSTMENT_KINDS:
+        raise HTTPException(status_code=400, detail="Type must be 'addition' or 'deduction'")
+    if not (1 <= payload.month <= 12) or not (2000 <= payload.year <= 2100):
+        raise HTTPException(status_code=400, detail="Invalid month or year")
+    if not math.isfinite(payload.amount) or payload.amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be greater than 0")
+    if payload.amount > MAX_ADJUSTMENT_AMOUNT:
+        raise HTTPException(status_code=400, detail="Amount is too large")
+    reason = (payload.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="A reason is required")
+    if len(reason) > 200:
+        raise HTTPException(status_code=400, detail="Reason must be 200 characters or fewer")
+
+    employee = db.query(User).filter(User.id == payload.user_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    adjustment = PayrollAdjustment(
+        user_id=employee.id,
+        year=payload.year,
+        month=payload.month,
+        kind=payload.kind,
+        amount=round(payload.amount, 2),
+        reason=reason,
+        created_by=current_user.id
+    )
+    db.add(adjustment)
+    db.commit()
+    db.refresh(adjustment)
+    return _adjustment_dict(adjustment)
+
+
+@router.delete("/adjustments/{adjustment_id}")
+def delete_adjustment(
+    adjustment_id: UUID,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    adjustment = db.query(PayrollAdjustment).filter(PayrollAdjustment.id == adjustment_id).first()
+    if not adjustment:
+        raise HTTPException(status_code=404, detail="Adjustment not found")
+    db.delete(adjustment)
+    db.commit()
+    return {"message": "Adjustment removed"}

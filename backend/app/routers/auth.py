@@ -69,7 +69,14 @@ def login(
         "employee_id": user.employee_id,
         "face_enrolled": user.face_enrolled,
         "saturday_policy": user.saturday_policy,
-        "allow_remote_checkin": user.allow_remote_checkin
+        "allow_remote_checkin": user.allow_remote_checkin,
+        "joining_date": user.joining_date,
+        "email": user.email,
+        "designation": user.designation,
+        "department": user.department,
+        "reporting_manager": user.reporting_manager,
+        "shift_start": user.shift_start,
+        "shift_end": user.shift_end
     }
 
 @router.get("/health")
@@ -93,7 +100,13 @@ def get_me(current_user: User = Depends(get_current_user)):
         "role": current_user.role,
         "face_enrolled": current_user.face_enrolled,
         "saturday_policy": current_user.saturday_policy,
+        "joining_date": current_user.joining_date,
         "allow_remote_checkin": current_user.allow_remote_checkin,
+        "designation": current_user.designation,
+        "department": current_user.department,
+        "reporting_manager": current_user.reporting_manager,
+        "shift_start": current_user.shift_start,
+        "shift_end": current_user.shift_end,
         "preferred_checkin_time": current_user.preferred_checkin_time,
         "enable_checkin_reminder": current_user.enable_checkin_reminder
     }

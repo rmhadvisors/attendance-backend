@@ -12,7 +12,7 @@ from app.models.user import User
 def main():
     email = os.getenv("ADMIN_EMAIL", "admin@glrattendance.com")
     password = os.getenv("ADMIN_PASSWORD")
-    name = os.getenv("ADMIN_NAME", "GLR Admin")
+    name = os.getenv("ADMIN_NAME", "RMH Admin")
     employee_id = os.getenv("ADMIN_EMPLOYEE_ID", "ADMIN-001")
 
     if not password:

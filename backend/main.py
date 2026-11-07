@@ -7,7 +7,7 @@ import schemas
 
 models.Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="GLR Attendance")
+app = FastAPI(title="RMH Attendance")
 
 
 def get_db():
@@ -20,7 +20,7 @@ def get_db():
 
 @app.get("/")
 def home():
-    return {"message": "GLR Attendance Running"}
+    return {"message": "RMH Attendance Running"}
 
 
 @app.post("/employees", response_model=schemas.EmployeeResponse)

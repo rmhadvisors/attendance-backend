@@ -4,6 +4,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     Float,
+    Integer,
     Boolean,
     Text,
     ForeignKey
@@ -117,6 +118,40 @@ class AttendanceInterval(Base):
     checkout_mood_note = Column(Text, nullable=True)
 
     duration_hours = Column(Float, default=0.0)
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )
+
+
+class AttendanceRegularization(Base):
+    """One row per self-service regularization an employee makes.
+
+    Used to enforce the monthly limit. Admin overrides are never recorded here
+    and are never limited.
+    """
+    __tablename__ = "attendance_regularizations"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    # The day that was regularized
+    attendance_date = Column(Date, nullable=False)
+
+    # Quota period (year/month in IST) in which the regularization was USED
+    quota_year = Column(Integer, nullable=False)
+    quota_month = Column(Integer, nullable=False)
 
     created_at = Column(
         DateTime,

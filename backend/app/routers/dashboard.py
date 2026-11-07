@@ -87,6 +87,21 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
 
     log_by_date = {log.date: log for log in logs}
 
+    from app.models.user import User
+    from app.routers.payroll import get_joining_adjustment
+    worker = db.query(User).filter(User.id == user_id).first()
+    join_date, exit_date, billing_days = get_joining_adjustment(worker, year, month, num_days) if worker else (None, None, 30.0)
+
+    # No day worked and no paid leave in the month => nothing is payable, so 0 paid days
+    paid_statuses = {"full_day", "holiday_work", "half_day", "present", "comp_off_leave"}
+    has_paid_attendance = any(
+        log.day_status in paid_statuses
+        or (log.checkin_time is not None and log.checkout_time is None)
+        for log in logs
+    )
+    if not has_paid_attendance:
+        return 0.0
+
     # If it is a future month, return 0.0
     if year > current_date_ist.year or (year == current_date_ist.year and month > current_date_ist.month):
         return 0.0
@@ -96,6 +111,8 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
         total_deductions = 0.0
         for day_num in range(1, num_days + 1):
             d = date(year, month, day_num)
+            if (join_date and d < join_date) or (exit_date and d > exit_date):
+                continue
             is_sun = d.weekday() == 6
             is_hol = d in holiday_dates
             is_work_configured = days_map[d.weekday()]
@@ -116,12 +133,14 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
             else:
                 if is_expected_working_day:
                     total_deductions += 1.0
-        return max(0.0, 30.0 - total_deductions)
+        return max(0.0, billing_days - total_deductions)
 
     # If it is the current month, calculate accrued days to date
     accrued_days = 0.0
     for day_num in range(1, num_days + 1):
         d = date(year, month, day_num)
+        if (join_date and d < join_date) or (exit_date and d > exit_date):
+            continue
         if d > current_date_ist:
             continue
 
@@ -147,7 +166,7 @@ def calculate_dashboard_monthly_worked_days(db: Session, user_id: str, year: int
             if is_sun or is_hol or not is_work_configured:
                 accrued_days += 1.0
 
-    return min(30.0, accrued_days)
+    return min(billing_days, accrued_days)
 
 @router.get("/employee-stats")
 def get_employee_stats(
@@ -327,6 +346,7 @@ def get_employee_stats(
         "query_year": q_year,
         "query_month": q_month,
         "saturday_policy": user.saturday_policy,
+        "joining_date": user.joining_date,
         "records": calendar_records,
         "yearly_stats": {
             "total_hours": round(yearly_hours, 2),

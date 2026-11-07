@@ -1,5 +1,5 @@
 """
-Centralised timezone helpers for the GLR Attendance backend.
+Centralised timezone helpers for the RMH Attendance backend.
 
 The EC2 server runs in UTC.  All business logic (check-in times, today's date,
 checkin-status thresholds, etc.) must use IST (UTC+5:30).

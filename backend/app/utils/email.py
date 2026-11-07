@@ -26,7 +26,7 @@ def send_reset_password_email(to_email: str, reset_link: str) -> bool:
 
     # Create Message
     message = MIMEMultipart("alternative")
-    message["Subject"] = "Reset your GLR Attendance Password"
+    message["Subject"] = "Reset your RMH Attendance Password"
     message["From"] = smtp_from
     message["To"] = to_email
 
@@ -34,7 +34,7 @@ def send_reset_password_email(to_email: str, reset_link: str) -> bool:
     text_content = f"""
 Hello,
 
-You requested a password reset for your GLR Attendance account.
+You requested a password reset for your RMH Attendance account.
 Please click the link below to reset your password (valid for 1 hour):
 
 {reset_link}
@@ -42,7 +42,7 @@ Please click the link below to reset your password (valid for 1 hour):
 If you did not request this, you can safely ignore this email.
 
 Best regards,
-GLR Attendance Team
+RMH Attendance Team
 """
 
     # HTML version (styled beautifully)
@@ -112,9 +112,9 @@ GLR Attendance Team
 </head>
 <body>
   <div class="container">
-    <div class="logo">GLR</div>
+    <div class="logo">RMH</div>
     <h1>Reset your password</h1>
-    <p>You requested a password reset for your GLR Attendance account. Click the button below to set a new password. This link is only valid for 1 hour.</p>
+    <p>You requested a password reset for your RMH Attendance account. Click the button below to set a new password. This link is only valid for 1 hour.</p>
     
     <a href="{reset_link}" class="button">Reset Password</a>
     
@@ -124,7 +124,7 @@ GLR Attendance Team
     <p>If you did not request a password reset, you can safely ignore this email.</p>
     
     <div class="footer">
-      This is an automated system email from GLR Attendance. Please do not reply directly to this message.
+      This is an automated system email from RMH Attendance. Please do not reply directly to this message.
     </div>
   </div>
 </body>

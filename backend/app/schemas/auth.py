@@ -16,6 +16,13 @@ class TokenResponse(BaseModel):
     face_enrolled: bool
     saturday_policy: Optional[str] = None
     allow_remote_checkin: Optional[bool] = False
+    joining_date: Optional[str] = None
+    email: Optional[str] = None
+    designation: Optional[str] = None
+    department: Optional[str] = None
+    reporting_manager: Optional[str] = None
+    shift_start: Optional[str] = None
+    shift_end: Optional[str] = None
 
 
 class ForgotPasswordRequest(BaseModel):

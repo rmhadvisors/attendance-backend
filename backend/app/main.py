@@ -8,7 +8,7 @@ from app.core.database import engine, Base
 
 # ── Import ALL models so create_all registers every table ──────────────────
 from app.models.user import User  # noqa: F401
-from app.models.attendance import AttendanceLog, AttendanceInterval  # noqa: F401
+from app.models.attendance import AttendanceLog, AttendanceInterval, AttendanceRegularization  # noqa: F401
 from app.models.company import Company, Location  # noqa: F401
 from app.models.holiday import Holiday  # noqa: F401
 from app.models.working_days import WorkingDaysConfig  # noqa: F401
@@ -73,7 +73,7 @@ async def lifespan(app: FastAPI):
         scheduler.shutdown()
 
 # ── App ─────────────────────────────────────────────────────────────────────
-app = FastAPI(title="GLR Attendance", lifespan=lifespan)
+app = FastAPI(title="RMH Attendance", lifespan=lifespan)
 
 # ── CORS Middleware ──────────────────────────────────────────────────────────
 app.add_middleware(
@@ -104,5 +104,5 @@ app.include_router(push.router)
 
 @app.get("/")
 def home():
-    return {"message": "GLR Attendance Running"}
+    return {"message": "RMH Attendance Running"}
 

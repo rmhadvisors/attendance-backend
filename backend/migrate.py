@@ -60,6 +60,13 @@ add_column_if_missing("attendance_logs", "checkout_mood",        "VARCHAR(50)")
 add_column_if_missing("attendance_logs", "checkout_mood_note",   "TEXT")
 add_column_if_missing("users", "preferred_checkin_time", "VARCHAR(10)", "'09:00'")
 add_column_if_missing("users", "enable_checkin_reminder", "BOOLEAN", "TRUE")
+add_column_if_missing("users", "date_of_joining", "DATE")
+add_column_if_missing("users", "date_of_exit", "DATE")
+add_column_if_missing("users", "department", "VARCHAR(100)")
+add_column_if_missing("users", "designation", "VARCHAR(100)")
+add_column_if_missing("users", "reporting_manager", "VARCHAR(100)")
+add_column_if_missing("users", "shift_start", "VARCHAR(10)")
+add_column_if_missing("users", "shift_end", "VARCHAR(10)")
 add_column_if_missing("leave_requests", "leave_type", "VARCHAR(20)", "'full_day'")
 
 

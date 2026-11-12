@@ -35,6 +35,12 @@ class PaidLeaveRequest(BaseModel):
     note: Optional[str] = None
 
 
+class RegularizationAction(BaseModel):
+    """Admin decision on a regularization request."""
+    action: str  # 'approve' | 'reject'
+    note: Optional[str] = None
+
+
 class RegularizeRequest(BaseModel):
     """Employee self-service regularization of a past day."""
     date: date

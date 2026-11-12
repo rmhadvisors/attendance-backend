@@ -158,3 +158,56 @@ class AttendanceRegularization(Base):
         default=datetime.utcnow
     )
 
+
+class RegularizationRequest(Base):
+    """An employee's request to correct the times of a day they checked in on.
+
+    It changes nothing by itself: attendance is only corrected once an admin
+    approves it. Original times are kept here so the admin can compare.
+    """
+    __tablename__ = "regularization_requests"
+
+    id = Column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4
+    )
+
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True
+    )
+
+    attendance_date = Column(Date, nullable=False)
+
+    # What the attendance record said when the request was made
+    original_checkin = Column(DateTime, nullable=True)
+    original_checkout = Column(DateTime, nullable=True)
+
+    # What the employee asks for
+    requested_checkin = Column(DateTime, nullable=False)
+    requested_checkout = Column(DateTime, nullable=False)
+
+    reason = Column(String(280), nullable=False)
+
+    # 'pending' | 'approved' | 'rejected'
+    status = Column(String(12), nullable=False, default="pending", index=True)
+
+    # Month the request counts against (IST, month it was made)
+    quota_year = Column(Integer, nullable=False)
+    quota_month = Column(Integer, nullable=False)
+
+    admin_note = Column(String(280), nullable=True)
+    action_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True
+    )
+    action_at = Column(DateTime, nullable=True)
+
+    created_at = Column(
+        DateTime,
+        default=datetime.utcnow
+    )

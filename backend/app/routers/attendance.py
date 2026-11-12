@@ -11,13 +11,13 @@ from app.utils.timezone import now_ist, today_ist
 from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_or_superadmin
 from app.models.user import User
-from app.models.attendance import AttendanceLog, AttendanceRegularization
+from app.models.attendance import AttendanceLog, AttendanceRegularization, RegularizationRequest
 from app.models.company import Location
 from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
 from app.models.comp_off import CompOffBalance, CompOffTransaction
 from app.models.notification import FaceVerificationFailure
-from app.schemas.attendance import AttendanceResponse, CheckInRequest, CheckOutRequest, OverrideRequest, PaidLeaveRequest, RegularizeRequest
+from app.schemas.attendance import AttendanceResponse, CheckInRequest, CheckOutRequest, OverrideRequest, PaidLeaveRequest, RegularizationAction, RegularizeRequest
 from app.services.aws_rekognition_service import AwsRekognitionError, compare_faces
 from app.services.face_storage_service import FaceStorageError, get_face_path, save_attendance_face, BACKEND_ROOT
 from app.services.gps_service import calculate_distance_meters
@@ -977,11 +977,73 @@ REGULARIZATION_MONTHLY_LIMIT = int(os.getenv("REGULARIZATION_MONTHLY_LIMIT", "3"
 
 
 def _regularization_used(db: Session, user_id, year: int, month: int) -> int:
+    """Approved regularizations that used this month's quota."""
     return db.query(AttendanceRegularization).filter(
         AttendanceRegularization.user_id == user_id,
         AttendanceRegularization.quota_year == year,
         AttendanceRegularization.quota_month == month
     ).count()
+
+
+def _regularization_pending(db: Session, user_id, year: int, month: int) -> int:
+    """Requests still waiting for an admin; they count against the limit until decided."""
+    return db.query(RegularizationRequest).filter(
+        RegularizationRequest.user_id == user_id,
+        RegularizationRequest.status == "pending",
+        RegularizationRequest.quota_year == year,
+        RegularizationRequest.quota_month == month
+    ).count()
+
+
+def _preview_day_status(db: Session, user: User, day: date, hours: float) -> str:
+    """What the day would become for these hours (same thresholds as check-out / override)."""
+    holiday = db.query(Holiday).filter(Holiday.date == day).first()
+    working_days = db.query(WorkingDaysConfig).first()
+    days_map = [True, True, True, True, True, True, False]
+    if working_days:
+        days_map = [
+            working_days.monday, working_days.tuesday, working_days.wednesday,
+            working_days.thursday, working_days.friday, working_days.saturday,
+            working_days.sunday
+        ]
+    policy = user.saturday_policy or "alt_sat_holiday"
+    if not is_user_expected_working_day(day, policy, {holiday.date} if holiday else set(), days_map):
+        return "holiday_work"
+    full_hours = 6.5 if (day.weekday() == 5 and policy == "all_sat_half_day") else 8.5
+    if hours >= full_hours:
+        return "full_day"
+    if hours >= 5.0:
+        return "half_day"
+    return "absent"
+
+
+def _hours_between(start, end):
+    if start is None or end is None:
+        return None
+    return round((end - start).total_seconds() / 3600, 2)
+
+
+def _regularization_dict(req: RegularizationRequest, user: User, db: Session) -> dict:
+    requested_hours = _hours_between(req.requested_checkin, req.requested_checkout)
+    return {
+        "id": str(req.id),
+        "user_id": str(req.user_id),
+        "employee_name": user.name,
+        "employee_id": user.employee_id,
+        "date": req.attendance_date,
+        "original_checkin": req.original_checkin,
+        "original_checkout": req.original_checkout,
+        "original_hours": _hours_between(req.original_checkin, req.original_checkout),
+        "requested_checkin": req.requested_checkin,
+        "requested_checkout": req.requested_checkout,
+        "requested_hours": requested_hours,
+        "resulting_status": _preview_day_status(db, user, req.attendance_date, requested_hours or 0.0),
+        "reason": req.reason,
+        "status": req.status,
+        "admin_note": req.admin_note,
+        "created_at": req.created_at,
+        "action_at": req.action_at
+    }
 
 
 @router.get("/regularization-quota")
@@ -990,15 +1052,17 @@ def get_regularization_quota(
     db: Session = Depends(get_db)
 ):
     if current_user.role in ["admin", "superadmin"]:
-        return {"unlimited": True, "limit": None, "used": 0, "remaining": None}
+        return {"unlimited": True, "limit": None, "used": 0, "pending": 0, "remaining": None}
 
     today = today_ist()
     used = _regularization_used(db, current_user.id, today.year, today.month)
+    pending = _regularization_pending(db, current_user.id, today.year, today.month)
     return {
         "unlimited": False,
         "limit": REGULARIZATION_MONTHLY_LIMIT,
         "used": used,
-        "remaining": max(0, REGULARIZATION_MONTHLY_LIMIT - used)
+        "pending": pending,
+        "remaining": max(0, REGULARIZATION_MONTHLY_LIMIT - used - pending)
     }
 
 
@@ -1008,10 +1072,11 @@ def regularize_my_attendance(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Employee self-service regularization of a past day, limited per month.
-    Only corrects the times of a day the employee actually checked in on (e.g. checked in
-    at 12 instead of 9). A day with no check-in cannot be created this way - ask an admin.
-    Admins are not limited and should use the override endpoint."""
+    """Employee asks to correct the times of a past day they checked in on.
+
+    Nothing is changed here: the request goes to an admin, and attendance is only
+    corrected when the admin approves it. A day with no check-in cannot be requested.
+    """
     if current_user.role in ["admin", "superadmin"]:
         raise HTTPException(status_code=400, detail="Admins can override attendance directly without a limit")
 
@@ -1054,37 +1119,141 @@ def regularize_my_attendance(
                    "If you were present but forgot to check in, please contact your admin."
         )
 
-    # Enforce monthly quota
+    # One open request per day
+    already_pending = db.query(RegularizationRequest).filter(
+        RegularizationRequest.user_id == current_user.id,
+        RegularizationRequest.attendance_date == data.date,
+        RegularizationRequest.status == "pending"
+    ).first()
+    if already_pending:
+        raise HTTPException(status_code=400, detail="You already have a request waiting for approval for this day")
+
+    # Monthly limit (approved + still-pending requests)
     used = _regularization_used(db, current_user.id, today.year, today.month)
-    if used >= REGULARIZATION_MONTHLY_LIMIT:
+    pending = _regularization_pending(db, current_user.id, today.year, today.month)
+    if used + pending >= REGULARIZATION_MONTHLY_LIMIT:
         raise HTTPException(
             status_code=400,
-            detail=f"You have used all {REGULARIZATION_MONTHLY_LIMIT} regularizations for this month. Please contact your admin."
+            detail=f"You have used all {REGULARIZATION_MONTHLY_LIMIT} regularizations for this month "
+                   f"(including requests waiting for approval). Please contact your admin."
         )
 
-    # Record the usage; _apply_attendance_override commits both together
-    db.add(AttendanceRegularization(
+    db.add(RegularizationRequest(
         user_id=current_user.id,
         attendance_date=data.date,
+        original_checkin=attendance.checkin_time,
+        original_checkout=attendance.checkout_time,
+        requested_checkin=checkin,
+        requested_checkout=checkout,
+        reason=note,
+        status="pending",
         quota_year=today.year,
         quota_month=today.month
     ))
+    db.commit()
 
-    override = OverrideRequest(
-        day_status="present",
-        admin_note=note,
-        checkin_time=checkin,
-        checkout_time=checkout
-    )
-    _apply_attendance_override(db, attendance, override, current_user, employee_note=note)
-
-    used += 1
     return {
-        "message": "Attendance regularized successfully",
+        "message": "Request sent to your admin for approval. Your attendance changes only after it is approved.",
+        "status": "pending",
         "limit": REGULARIZATION_MONTHLY_LIMIT,
         "used": used,
-        "remaining": max(0, REGULARIZATION_MONTHLY_LIMIT - used)
+        "pending": pending + 1,
+        "remaining": max(0, REGULARIZATION_MONTHLY_LIMIT - used - pending - 1)
     }
+
+
+@router.get("/my-regularizations")
+def my_regularization_requests(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """The employee's own requests (newest first), so they can see the decision."""
+    rows = db.query(RegularizationRequest).filter(
+        RegularizationRequest.user_id == current_user.id
+    ).order_by(RegularizationRequest.created_at.desc()).limit(20).all()
+    return [_regularization_dict(r, current_user, db) for r in rows]
+
+
+@router.get("/regularization-requests")
+def list_regularization_requests(
+    status: str = "pending",
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    """Admin: regularization requests. status = pending | approved | rejected | all."""
+    query = db.query(RegularizationRequest, User).join(User, RegularizationRequest.user_id == User.id)
+    if status != "all":
+        if status not in ("pending", "approved", "rejected"):
+            raise HTTPException(status_code=400, detail="Invalid status filter")
+        query = query.filter(RegularizationRequest.status == status)
+    order = RegularizationRequest.created_at.asc() if status == "pending" else RegularizationRequest.created_at.desc()
+    rows = query.order_by(order).limit(300).all()
+    return [_regularization_dict(req, user, db) for req, user in rows]
+
+
+@router.post("/regularization-requests/{request_id}/action")
+def action_regularization_request(
+    request_id: UUID,
+    data: RegularizationAction,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    """Admin approves (attendance is corrected now) or declines (nothing changes)."""
+    req = db.query(RegularizationRequest).filter(RegularizationRequest.id == request_id).first()
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    if req.status != "pending":
+        raise HTTPException(status_code=400, detail="This request has already been decided")
+    if data.action not in ("approve", "reject"):
+        raise HTTPException(status_code=400, detail="Action must be 'approve' or 'reject'")
+
+    note = (data.note or "").strip() or None
+    if note and len(note) > 280:
+        raise HTTPException(status_code=400, detail="Note must be 280 characters or fewer")
+
+    employee = db.query(User).filter(User.id == req.user_id).first()
+    if not employee:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if data.action == "approve":
+        attendance = db.query(AttendanceLog).filter(
+            AttendanceLog.user_id == req.user_id,
+            AttendanceLog.date == req.attendance_date
+        ).first()
+        if not attendance or attendance.checkin_time is None:
+            raise HTTPException(
+                status_code=400,
+                detail="The employee no longer has a check-in on this day, so it cannot be approved"
+            )
+
+        req.status = "approved"
+        req.admin_note = note
+        req.action_by = current_user.id
+        req.action_at = now_ist()
+        # The approval uses one of the employee's monthly corrections
+        db.add(AttendanceRegularization(
+            user_id=req.user_id,
+            attendance_date=req.attendance_date,
+            quota_year=req.quota_year,
+            quota_month=req.quota_month
+        ))
+        override = OverrideRequest(
+            day_status="present",
+            admin_note=req.reason,
+            checkin_time=req.requested_checkin,
+            checkout_time=req.requested_checkout
+        )
+        # Applies the corrected times and commits everything together
+        _apply_attendance_override(db, attendance, override, current_user, employee_note=req.reason)
+    else:
+        req.status = "rejected"
+        req.admin_note = note
+        req.action_by = current_user.id
+        req.action_at = now_ist()
+        db.commit()
+
+    db.refresh(req)
+    return _regularization_dict(req, employee, db)
 
 
 @router.get("/photo")

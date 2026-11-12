@@ -9,7 +9,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user, require_admin_or_superadmin
 
 from app.models.user import User
-from app.models.attendance import AttendanceLog
+from app.models.attendance import AttendanceLog, RegularizationRequest
 
 router = APIRouter(
     prefix="/dashboard",
@@ -45,8 +45,13 @@ def admin_dashboard_stats(
         AttendanceLog.day_status == "half_day"
     ).count()
 
+    pending_regularizations = db.query(RegularizationRequest).filter(
+        RegularizationRequest.status == "pending"
+    ).count()
+
     return {
         "date": today,
+        "pending_regularizations": pending_regularizations,
         "total_employees": total_employees,
         "today_present": today_present,
         "today_absent": today_absent,

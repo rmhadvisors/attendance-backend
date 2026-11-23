@@ -16,6 +16,8 @@ from app.schemas.employee import (
 )
 from app.core.security import hash_password, require_admin_or_superadmin
 
+EMPLOYMENT_TYPES = ("full_time", "part_time")
+
 router = APIRouter(
     prefix="/employees",
     tags=["Employees"]
@@ -61,7 +63,19 @@ def create_employee(
         designation=employee.designation or None,
         reporting_manager=employee.reporting_manager or None,
         shift_start=employee.shift_start or None,
-        shift_end=employee.shift_end or None
+        shift_end=employee.shift_end or None,
+        date_of_birth=employee.date_of_birth,
+        personal_email=employee.personal_email or None,
+        blood_group=employee.blood_group or None,
+        emergency_contact_name=employee.emergency_contact_name or None,
+        emergency_contact_number=employee.emergency_contact_number or None,
+        pan_number=(employee.pan_number or "").strip().upper() or None,
+        bank_name=employee.bank_name or None,
+        bank_account_no=employee.bank_account_no or None,
+        pf_uan_no=employee.pf_uan_no or None,
+        esic_no=employee.esic_no or None,
+        work_location=employee.work_location or None,
+        employment_type=employee.employment_type if employee.employment_type in EMPLOYMENT_TYPES else "full_time"
     )
 
     try:
@@ -122,8 +136,12 @@ def update_employee(
         user.role = employee_data.role
     if employee_data.saturday_policy is not None:
         user.saturday_policy = employee_data.saturday_policy
-    if employee_data.base_salary is not None:
-        user.base_salary = employee_data.base_salary
+    if employee_data.base_salary is not None and employee_data.base_salary != (user.base_salary or 0.0):
+        # Goes through the payroll helper so the change actually reaches payroll (see its docstring)
+        from app.routers.payroll import apply_employee_salary
+        from app.utils.timezone import now_ist
+        ist_now = now_ist()
+        apply_employee_salary(db, user, ist_now.year, ist_now.month, employee_data.base_salary)
     if employee_data.allow_remote_checkin is not None:
         user.allow_remote_checkin = employee_data.allow_remote_checkin
 
@@ -141,6 +159,22 @@ def update_employee(
         if field in fields_set:
             value = getattr(employee_data, field)
             setattr(user, field, value.strip() or None if value else None)
+
+    if "employment_type" in fields_set and employee_data.employment_type is not None:
+        if employee_data.employment_type not in EMPLOYMENT_TYPES:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="Employment type must be full time or part time")
+        user.employment_type = employee_data.employment_type
+    if "date_of_birth" in fields_set:
+        user.date_of_birth = employee_data.date_of_birth
+    for field in ("personal_email", "blood_group", "emergency_contact_name",
+                  "emergency_contact_number", "pan_number", "bank_name", "bank_account_no",
+                  "pf_uan_no", "esic_no", "work_location"):
+        if field in fields_set:
+            value = (getattr(employee_data, field) or "").strip()
+            if field == "pan_number":
+                value = value.upper()
+            setattr(user, field, value or None)
 
     if employee_data.new_password:
         user.password_hash = hash_password(employee_data.new_password)

@@ -137,6 +137,21 @@ class User(Base):
         nullable=True
     )
 
+    # --- Payslip details (admin-entered) ---
+    date_of_birth = Column(Date, nullable=True)
+    personal_email = Column(String, nullable=True)
+    blood_group = Column(String(10), nullable=True)
+    emergency_contact_name = Column(String(100), nullable=True)
+    emergency_contact_number = Column(String(30), nullable=True)
+    pan_number = Column(String(20), nullable=True)
+    bank_name = Column(String(100), nullable=True)
+    bank_account_no = Column(String(40), nullable=True)
+    pf_uan_no = Column(String(60), nullable=True)
+    esic_no = Column(String(40), nullable=True)
+    work_location = Column(String(100), nullable=True)
+    # 'full_time' or 'part_time' (label only; payroll rules are the same)
+    employment_type = Column(String(20), nullable=False, default="full_time", server_default="full_time")
+
     @property
     def joining_date(self):
         """Joining date as YYYY-MM-DD: the admin-set date_of_joining if present,

@@ -28,11 +28,18 @@ class OverrideRequest(BaseModel):
 
 
 class PaidLeaveRequest(BaseModel):
-    """Admin grants paid leave to an employee for one date or a date range."""
-    user_id: UUID
+    """Admin grants paid leave to one employee (user_id) or to all active employees (all_employees)."""
+    user_id: Optional[UUID] = None
+    all_employees: bool = False
     start_date: date
     end_date: date
     note: Optional[str] = None
+
+
+class PaidLeaveBulkRemove(BaseModel):
+    """Admin takes back every paid leave in a date range, for all employees."""
+    start_date: date
+    end_date: date
 
 
 class RegularizationAction(BaseModel):

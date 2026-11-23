@@ -39,10 +39,16 @@ def login(
         User.email == login_data.email
     ).first()
 
-    if not user or not verify_password(login_data.password, user.password_hash):
+    if not user:
         raise HTTPException(
             status_code=401,
-            detail="Invalid email or password"
+            detail="Incorrect email"
+        )
+
+    if not verify_password(login_data.password, user.password_hash):
+        raise HTTPException(
+            status_code=401,
+            detail="Incorrect password"
         )
 
     if not user.is_active:

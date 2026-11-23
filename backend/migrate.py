@@ -67,6 +67,18 @@ add_column_if_missing("users", "designation", "VARCHAR(100)")
 add_column_if_missing("users", "reporting_manager", "VARCHAR(100)")
 add_column_if_missing("users", "shift_start", "VARCHAR(10)")
 add_column_if_missing("users", "shift_end", "VARCHAR(10)")
+add_column_if_missing("users", "date_of_birth", "DATE")
+add_column_if_missing("users", "personal_email", "VARCHAR(255)")
+add_column_if_missing("users", "blood_group", "VARCHAR(10)")
+add_column_if_missing("users", "emergency_contact_name", "VARCHAR(100)")
+add_column_if_missing("users", "emergency_contact_number", "VARCHAR(30)")
+add_column_if_missing("users", "pan_number", "VARCHAR(20)")
+add_column_if_missing("users", "bank_name", "VARCHAR(100)")
+add_column_if_missing("users", "bank_account_no", "VARCHAR(40)")
+add_column_if_missing("users", "pf_uan_no", "VARCHAR(60)")
+add_column_if_missing("users", "esic_no", "VARCHAR(40)")
+add_column_if_missing("users", "work_location", "VARCHAR(100)")
+add_column_if_missing("users", "employment_type", "VARCHAR(20)", "'full_time'")
 add_column_if_missing("leave_requests", "leave_type", "VARCHAR(20)", "'full_day'")
 
 
@@ -96,6 +108,31 @@ cur.execute("""
     );
 """)
 print("  OK: Checked/Created table attendance_intervals")
+
+print("\n-- payslip_entries ----------------------------------------")
+cur.execute("""
+    CREATE TABLE IF NOT EXISTS payslip_entries (
+        id UUID PRIMARY KEY,
+        user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        year INTEGER NOT NULL,
+        month INTEGER NOT NULL,
+        pf FLOAT NOT NULL DEFAULT 0,
+        esic FLOAT NOT NULL DEFAULT 0,
+        prof_tax FLOAT NOT NULL DEFAULT 0,
+        employer_pf FLOAT NOT NULL DEFAULT 0,
+        employer_esic FLOAT NOT NULL DEFAULT 0,
+        updated_at TIMESTAMP,
+        CONSTRAINT uq_payslip_entry_user_month UNIQUE (user_id, year, month)
+    );
+""")
+cur.execute("CREATE INDEX IF NOT EXISTS ix_payslip_entries_user_id ON payslip_entries(user_id)")
+add_column_if_missing("payslip_entries", "paid_days_override", "FLOAT")
+add_column_if_missing("payslip_entries", "base_salary_override", "FLOAT")
+add_column_if_missing("payslip_entries", "basic_earned_override", "FLOAT")
+add_column_if_missing("payslip_entries", "earning_components", "TEXT")
+add_column_if_missing("payslip_entries", "tds", "FLOAT", "0")
+add_column_if_missing("payslip_entries", "tds_percent", "FLOAT")
+print("  OK: Checked/Created table payslip_entries")
 
 cur.close()
 conn.close()

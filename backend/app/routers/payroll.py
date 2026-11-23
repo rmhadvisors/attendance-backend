@@ -1,9 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import extract
 from datetime import date, datetime
 import calendar
 import math
+import re
+import json
 from typing import Optional
 from uuid import UUID
 from pydantic import BaseModel
@@ -14,7 +16,7 @@ from app.models.user import User
 from app.models.attendance import AttendanceLog
 from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
-from app.models.payroll import MonthlySalary, PayrollAdjustment
+from app.models.payroll import MonthlySalary, PayrollAdjustment, PayslipEntry
 
 router = APIRouter(
     prefix="/payroll",
@@ -318,6 +320,47 @@ def get_payroll_summary(
         "records": payroll_records
     }
 
+def apply_employee_salary(db: Session, emp: User, q_year: int, q_month: int, new_salary: float):
+    """Set an employee's monthly salary from (q_year, q_month) onwards. Does not commit.
+
+    Payroll reads MonthlySalary rows first and the user's base_salary only as a fallback, so
+    every salary change must go through here or it can be silently ignored.
+    """
+    # To prevent affecting past months, if we are changing the salary and the user
+    # does not have any prior MonthlySalary records, lock in their previous salary for the
+    # month before this change takes effect.
+    if emp.base_salary and emp.base_salary != new_salary:
+        has_prior = db.query(MonthlySalary).filter(MonthlySalary.user_id == emp.id).first()
+        if not has_prior:
+            prev_year = q_year
+            prev_month = q_month - 1
+            if prev_month == 0:
+                prev_month = 12
+                prev_year -= 1
+            db.add(MonthlySalary(
+                user_id=emp.id,
+                year=prev_year,
+                month=prev_month,
+                base_salary=emp.base_salary
+            ))
+
+    record = db.query(MonthlySalary).filter(
+        MonthlySalary.user_id == emp.id,
+        MonthlySalary.year == q_year,
+        MonthlySalary.month == q_month
+    ).first()
+    if record:
+        record.base_salary = new_salary
+    else:
+        db.add(MonthlySalary(
+            user_id=emp.id,
+            year=q_year,
+            month=q_month,
+            base_salary=new_salary
+        ))
+    emp.base_salary = new_salary
+
+
 @router.post("/salary")
 def update_employee_salary(
     payload: SalaryUpdateSchema,
@@ -337,46 +380,7 @@ def update_employee_salary(
     q_year = payload.year or ist_now.year
     q_month = payload.month or ist_now.month
 
-    # To prevent affecting past months, if we are changing the salary and the user
-    # does not have any prior MonthlySalary records, we should lock in their
-    # previous salary for the month before this change takes effect.
-    if emp.base_salary and emp.base_salary != payload.base_salary:
-        has_prior = db.query(MonthlySalary).filter(MonthlySalary.user_id == emp.id).first()
-        if not has_prior:
-            prev_year = q_year
-            prev_month = q_month - 1
-            if prev_month == 0:
-                prev_month = 12
-                prev_year -= 1
-            
-            baseline = MonthlySalary(
-                user_id=emp.id,
-                year=prev_year,
-                month=prev_month,
-                base_salary=emp.base_salary
-            )
-            db.add(baseline)
-
-    # Check if a monthly salary record already exists
-    record = db.query(MonthlySalary).filter(
-        MonthlySalary.user_id == emp.id,
-        MonthlySalary.year == q_year,
-        MonthlySalary.month == q_month
-    ).first()
-
-    if record:
-        record.base_salary = payload.base_salary
-    else:
-        record = MonthlySalary(
-            user_id=emp.id,
-            year=q_year,
-            month=q_month,
-            base_salary=payload.base_salary
-        )
-        db.add(record)
-
-    # Also update the user's default base_salary
-    emp.base_salary = payload.base_salary
+    apply_employee_salary(db, emp, q_year, q_month, payload.base_salary)
     db.commit()
 
     return {"message": "Salary updated successfully", "base_salary": payload.base_salary}
@@ -616,3 +620,359 @@ def delete_adjustment(
     db.delete(adjustment)
     db.commit()
     return {"message": "Adjustment removed"}
+
+
+
+# ── Payslips (admin only) ────────────────────────────────────────────────────
+
+class EarningComponent(BaseModel):
+    name: str
+    amount: float
+
+
+class PayslipEntryPayload(BaseModel):
+    user_id: UUID
+    year: int
+    month: int
+    pf: float = 0.0
+    esic: float = 0.0
+    prof_tax: float = 0.0
+    employer_pf: float = 0.0
+    employer_esic: float = 0.0
+    # None = use what the payroll calculation says
+    paid_days_override: Optional[float] = None
+    base_salary_override: Optional[float] = None
+    basic_earned_override: Optional[float] = None
+    # Parts of the base salary printed as their own earning lines (HRA, ...). Basic = the rest.
+    earning_components: list[EarningComponent] = []
+    # TDS: a fixed amount, or a % of gross earnings (the % wins when set)
+    tds: float = 0.0
+    tds_percent: Optional[float] = None
+    # Employee payslip details, stored on the employee and reused every month
+    pan_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    pf_uan_no: Optional[str] = None
+    esic_no: Optional[str] = None
+    work_location: Optional[str] = None
+
+
+PAN_REGEX = re.compile(r"[A-Z]{5}[0-9]{4}[A-Z]")
+# 4th character of a PAN is the holder type: Company, Person, HUF, Firm, AOP, Trust, Local authority,
+# Juridical person.
+PAN_HOLDER_TYPES = "ABCFGHJLPT"
+
+
+def pan_error(pan: str) -> Optional[str]:
+    if not PAN_REGEX.fullmatch(pan):
+        return "PAN must be 10 characters: 5 letters, 4 digits, 1 letter (e.g. ABCPE1234F)"
+    if pan[3] not in PAN_HOLDER_TYPES:
+        return "PAN is not valid: the 4th character must be one of A, B, C, F, G, H, J, L, P, T"
+    return None
+
+
+def parse_components(raw) -> list:
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return []
+    return [
+        {"name": str(c.get("name", "")), "amount": float(c.get("amount", 0))}
+        for c in data if isinstance(c, dict)
+    ]
+
+
+EMPLOYEE_PAYSLIP_FIELDS = ("pan_number", "bank_name", "bank_account_no", "pf_uan_no", "esic_no", "work_location")
+OVERRIDE_FIELDS = ("paid_days_override", "base_salary_override", "basic_earned_override")
+
+
+def _entry_dict(entry: Optional[PayslipEntry]):
+    data = {
+        "pf": entry.pf if entry else 0.0,
+        "esic": entry.esic if entry else 0.0,
+        "prof_tax": entry.prof_tax if entry else 0.0,
+        "employer_pf": entry.employer_pf if entry else 0.0,
+        "employer_esic": entry.employer_esic if entry else 0.0,
+    }
+    for name in OVERRIDE_FIELDS:
+        data[name] = getattr(entry, name) if entry else None
+    data["earning_components"] = parse_components(entry.earning_components) if entry else []
+    data["tds"] = entry.tds if entry else 0.0
+    data["tds_percent"] = entry.tds_percent if entry else None
+    return data
+
+
+@router.get("/payslip-entry")
+def get_payslip_entry(
+    user_id: UUID,
+    year: int,
+    month: int,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    emp = db.query(User).filter(User.id == user_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    entry = db.query(PayslipEntry).filter(
+        PayslipEntry.user_id == user_id,
+        PayslipEntry.year == year,
+        PayslipEntry.month == month
+    ).first()
+
+    summary = get_payroll_summary(year=year, month=month, current_user=current_user, db=db)
+    rec = next((r for r in summary["records"] if r["user_id"] == str(user_id)), None)
+
+    data = _entry_dict(entry)
+    if not (entry and entry.earning_components):
+        earlier = db.query(PayslipEntry).filter(
+            PayslipEntry.user_id == user_id,
+            PayslipEntry.earning_components.isnot(None),
+            (PayslipEntry.year < year) | ((PayslipEntry.year == year) & (PayslipEntry.month < month))
+        ).order_by(PayslipEntry.year.desc(), PayslipEntry.month.desc()).first()
+        if earlier:
+            data["earning_components"] = parse_components(earlier.earning_components)
+    data["employee"] = {name: getattr(emp, name) or "" for name in EMPLOYEE_PAYSLIP_FIELDS}
+    data["calc"] = {
+        key: rec[key] for key in (
+            "base_salary", "total_paid_days", "calculated_salary", "worked_days", "paid_leaves",
+            "extra_days_worked", "total_days_present", "adjustments_added", "adjustments_deducted"
+        )
+    } if rec else None
+    return data
+
+
+@router.put("/payslip-entry")
+def save_payslip_entry(
+    payload: PayslipEntryPayload,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    if not (1 <= payload.month <= 12) or not (2000 <= payload.year <= 2100):
+        raise HTTPException(status_code=400, detail="Invalid month or year")
+    values = {
+        "pf": payload.pf, "esic": payload.esic, "prof_tax": payload.prof_tax,
+        "employer_pf": payload.employer_pf, "employer_esic": payload.employer_esic,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value < 0 or value > MAX_ADJUSTMENT_AMOUNT:
+            raise HTTPException(status_code=400, detail=f"Invalid amount for {name}")
+    overrides = {name: getattr(payload, name) for name in OVERRIDE_FIELDS}
+    for name, value in overrides.items():
+        if value is not None and (not math.isfinite(value) or value < 0 or value > MAX_ADJUSTMENT_AMOUNT):
+            raise HTTPException(status_code=400, detail=f"Invalid value for {name}")
+    if overrides["paid_days_override"] is not None and overrides["paid_days_override"] > 31:
+        raise HTTPException(status_code=400, detail="Paid days cannot be more than 31")
+
+    emp = db.query(User).filter(User.id == payload.user_id).first()
+    if not emp:
+        raise HTTPException(status_code=404, detail="Employee not found")
+
+    if not math.isfinite(payload.tds) or payload.tds < 0 or payload.tds > MAX_ADJUSTMENT_AMOUNT:
+        raise HTTPException(status_code=400, detail="Invalid TDS amount")
+    if payload.tds_percent is not None and (
+        not math.isfinite(payload.tds_percent) or payload.tds_percent < 0 or payload.tds_percent > 100
+    ):
+        raise HTTPException(status_code=400, detail="TDS % must be between 0 and 100")
+
+    components = []
+    seen_names = set()
+    for comp in payload.earning_components:
+        name = comp.name.strip()
+        if not name or len(name) > 40:
+            raise HTTPException(status_code=400, detail="Each earning needs a name (up to 40 characters)")
+        if name.lower() in seen_names or name.lower() == "basic":
+            raise HTTPException(status_code=400, detail=f"Duplicate earning name: {name}")
+        if not math.isfinite(comp.amount) or comp.amount <= 0 or comp.amount > MAX_ADJUSTMENT_AMOUNT:
+            raise HTTPException(status_code=400, detail=f"Amount for {name} must be greater than 0")
+        seen_names.add(name.lower())
+        components.append({"name": name, "amount": round(comp.amount, 2)})
+    if components:
+        effective_base = overrides["base_salary_override"]
+        if effective_base is None:
+            effective_base = get_employee_monthly_salary(
+                db, emp.id, payload.year, payload.month, emp.base_salary
+            )
+        if sum(c["amount"] for c in components) > effective_base + 0.005:
+            raise HTTPException(
+                status_code=400,
+                detail="HRA and other earnings add up to more than the base salary, so Basic would be negative"
+            )
+
+    details = {name: (getattr(payload, name) or "").strip() for name in EMPLOYEE_PAYSLIP_FIELDS}
+    details["pan_number"] = details["pan_number"].upper()
+    if details["pan_number"]:
+        error = pan_error(details["pan_number"])
+        if error:
+            raise HTTPException(status_code=400, detail=error)
+    if details["bank_account_no"] and not re.fullmatch(r"[0-9]{6,24}", details["bank_account_no"]):
+        raise HTTPException(status_code=400, detail="Bank account number should be digits only")
+    for name, value in details.items():
+        setattr(emp, name, value or None)
+
+    entry = db.query(PayslipEntry).filter(
+        PayslipEntry.user_id == payload.user_id,
+        PayslipEntry.year == payload.year,
+        PayslipEntry.month == payload.month
+    ).first()
+    if not entry:
+        entry = PayslipEntry(user_id=payload.user_id, year=payload.year, month=payload.month)
+        db.add(entry)
+    for name, value in values.items():
+        setattr(entry, name, round(value, 2))
+    for name, value in overrides.items():
+        setattr(entry, name, None if value is None else round(value, 2))
+    entry.earning_components = json.dumps(components) if components else None
+    entry.tds = round(payload.tds, 2)
+    entry.tds_percent = payload.tds_percent
+    db.commit()
+    return _entry_dict(entry)
+
+
+def _collect_payslips(db: Session, current_user: User, year: int, month: int, only_user_id=None):
+    """Build payslip data dicts, reusing the exact /summary calculation so slips always
+    match the payroll screen."""
+    if not (1 <= month <= 12) or not (2000 <= year <= 2100):
+        raise HTTPException(status_code=400, detail="Invalid month or year")
+
+    summary = get_payroll_summary(year=year, month=month, current_user=current_user, db=db)
+    records = summary["records"]
+    if only_user_id is not None:
+        records = [r for r in records if r["user_id"] == str(only_user_id)]
+    else:
+        records = [r for r in records if r["base_salary"] > 0 and r["total_paid_days"] > 0]
+    if not records:
+        return []
+
+    user_ids = [UUID(r["user_id"]) for r in records]
+    users = {u.id: u for u in db.query(User).filter(User.id.in_(user_ids)).all()}
+    entries = {
+        e.user_id: e for e in db.query(PayslipEntry).filter(
+            PayslipEntry.year == year, PayslipEntry.month == month,
+            PayslipEntry.user_id.in_(user_ids)
+        ).all()
+    }
+    adjustments = {}
+    for a in db.query(PayrollAdjustment).filter(
+        PayrollAdjustment.year == year, PayrollAdjustment.month == month,
+        PayrollAdjustment.user_id.in_(user_ids)
+    ).order_by(PayrollAdjustment.created_at).all():
+        adjustments.setdefault(a.user_id, []).append(a)
+
+    slips = []
+    for rec in records:
+        uid = UUID(rec["user_id"])
+        emp = users[uid]
+        entry = entries.get(uid)
+        adjs = adjustments.get(uid, [])
+
+        # Admin overrides of the payroll calculation (if any) win over the computed values
+        paid_days = rec["total_paid_days"]
+        base_salary = rec["base_salary"]
+        salary_earned = rec["calculated_salary"]
+        if entry:
+            if entry.paid_days_override is not None:
+                paid_days = entry.paid_days_override
+            if entry.base_salary_override is not None:
+                base_salary = entry.base_salary_override
+            if entry.paid_days_override is not None or entry.base_salary_override is not None:
+                salary_earned = round(base_salary / 30.0 * paid_days, 2)
+            if entry.basic_earned_override is not None:
+                salary_earned = entry.basic_earned_override
+
+        # Split the base salary into Basic + HRA/other lines. Basic is the remainder, and its
+        # earned amount is the remainder of the total, so the lines always add up to the salary.
+        components = parse_components(entry.earning_components) if entry else []
+        component_total = sum(c["amount"] for c in components)
+        basic_monthly = round(base_salary - component_total, 2)
+        component_rows = [
+            (c["name"], c["amount"], round(c["amount"] / 30.0 * paid_days, 2)) for c in components
+        ]
+        basic_earned = round(salary_earned - sum(r[2] for r in component_rows), 2)
+
+        earnings = [("Basic", basic_monthly, basic_earned)] + component_rows
+        earnings += [(a.reason, None, a.amount) for a in adjs if a.kind == "addition"]
+        gross = round(sum(e[2] for e in earnings), 2)
+
+        deductions = []
+        if entry:
+            tds = round(gross * entry.tds_percent / 100.0, 2) if entry.tds_percent is not None else entry.tds
+            for label, value in (("PF", entry.pf), ("ESIC", entry.esic), ("Prof. Tax", entry.prof_tax), ("TDS", tds)):
+                if value:
+                    deductions.append((label, value))
+        deductions += [(a.reason, a.amount) for a in adjs if a.kind == "deduction"]
+        total_deductions = round(sum(d[1] for d in deductions), 2)
+
+        slips.append({
+            "year": year,
+            "month": month,
+            "employee_id": emp.employee_id,
+            "name": emp.name,
+            "email": emp.email,
+            "personal_email": emp.personal_email,
+            "designation": emp.designation,
+            "department": emp.department,
+            "work_location": emp.work_location,
+            "date_of_joining": emp.date_of_joining or (
+                date.fromisoformat(emp.joining_date) if emp.joining_date else None
+            ),
+            "date_of_birth": emp.date_of_birth,
+            "pan_number": emp.pan_number,
+            "bank_name": emp.bank_name,
+            "bank_account_no": emp.bank_account_no,
+            "pf_uan_no": emp.pf_uan_no,
+            "esic_no": emp.esic_no,
+            "paid_days": paid_days,
+            "rate_total": base_salary,
+            "earnings": earnings,
+            "deductions": deductions,
+            "gross": gross,
+            "total_deductions": total_deductions,
+            "net": round(gross - total_deductions, 2),
+            "employer_pf": entry.employer_pf if entry else 0.0,
+            "employer_esic": entry.employer_esic if entry else 0.0,
+        })
+    return slips
+
+
+def _pdf_response(pdf: bytes, filename: str):
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+@router.get("/payslip/{user_id}")
+def download_payslip(
+    user_id: UUID,
+    year: int,
+    month: int,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    from app.services.payslip_pdf import build_payslips_pdf
+
+    slips = _collect_payslips(db, current_user, year, month, only_user_id=user_id)
+    if not slips:
+        raise HTTPException(status_code=404, detail="Employee not found")
+    slip = slips[0]
+    safe_id = "".join(ch for ch in slip["employee_id"] if ch.isalnum() or ch in "-_") or "employee"
+    return _pdf_response(build_payslips_pdf(slips), f"Payslip_{safe_id}_{year}-{month:02d}.pdf")
+
+
+@router.get("/payslips")
+def download_all_payslips(
+    year: int,
+    month: int,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    """One PDF, one page per employee who has a salary and paid days this month."""
+    from app.services.payslip_pdf import build_payslips_pdf
+
+    slips = _collect_payslips(db, current_user, year, month)
+    if not slips:
+        raise HTTPException(status_code=404, detail="No payable employees for this month")
+    return _pdf_response(build_payslips_pdf(slips), f"Payslips_{year}-{month:02d}.pdf")

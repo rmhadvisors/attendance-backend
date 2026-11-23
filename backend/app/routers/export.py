@@ -534,3 +534,124 @@ def export_attendance_excel(
         filename=file_name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+
+# ── Employee master list (admin) ─────────────────────────────────────────────
+
+SATURDAY_POLICY_LABELS = {
+    "alt_sat_holiday": "2nd & 4th Saturday Holiday",
+    "all_sat_holiday": "All Saturdays Holiday",
+    "all_sat_working": "All Saturdays Working",
+    "all_sat_half_day": "All Saturdays Half Day (7h)",
+    "all_sat_wfh": "All Saturdays WFH",
+    "alt_sat_holiday_rest_wfh": "2nd & 4th Sat Holiday, rest WFH",
+}
+
+
+@router.get("/employees/xlsx")
+def export_employees_xlsx(
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    """Every employee with all stored details, as one Excel sheet."""
+    from io import BytesIO
+    from fastapi import Response
+    from openpyxl import Workbook
+    from app.utils.timezone import now_ist
+
+    ist_now = now_ist()
+    employees = db.query(User).filter(User.email != "admin@glrattendance.com").order_by(User.name).all()
+
+    # (header, value getter, kind) — kind: text | date | money | center
+    columns = [
+        ("Employee ID", lambda e, s: e.employee_id, "text"),
+        ("Name", lambda e, s: e.name, "text"),
+        # Organisation details
+        ("Employment Type", lambda e, s: "Part Time" if e.employment_type == "part_time" else "Full Time", "center"),
+        ("Date of Joining", lambda e, s: e.date_of_joining, "date"),
+        ("Department", lambda e, s: e.department, "text"),
+        ("Reporting Manager", lambda e, s: e.reporting_manager, "text"),
+        ("Designation", lambda e, s: e.designation, "text"),
+        ("Work Email", lambda e, s: e.email, "text"),
+        ("Role", lambda e, s: (e.role or "").replace("_", " ").title(), "text"),
+        # Personal details
+        ("Phone", lambda e, s: e.phone, "text"),
+        ("Personal Email", lambda e, s: e.personal_email, "text"),
+        ("Date of Birth", lambda e, s: e.date_of_birth, "date"),
+        ("Blood Group", lambda e, s: e.blood_group, "text"),
+        ("Emergency Contact Name", lambda e, s: e.emergency_contact_name, "text"),
+        ("Emergency Contact Number", lambda e, s: e.emergency_contact_number, "text"),
+        # Work settings
+        ("Shift Start", lambda e, s: e.shift_start, "center"),
+        ("Shift End", lambda e, s: e.shift_end, "center"),
+        ("Saturday Policy", lambda e, s: SATURDAY_POLICY_LABELS.get(e.saturday_policy, e.saturday_policy), "text"),
+        ("Monthly Salary", lambda e, s: s, "money"),
+        ("Remote Check-in", lambda e, s: "Yes" if e.allow_remote_checkin else "No", "center"),
+        # Everything else
+        ("Work Location", lambda e, s: e.work_location, "text"),
+        ("Date of Exit", lambda e, s: e.date_of_exit, "date"),
+        ("Status", lambda e, s: "Exited" if e.date_of_exit and e.date_of_exit < ist_now.date() else "Active", "center"),
+        ("Face Enrolled", lambda e, s: "Yes" if e.face_enrolled else "No", "center"),
+        ("PAN", lambda e, s: e.pan_number, "text"),
+        ("Salary Bank", lambda e, s: e.bank_name, "text"),
+        ("Salary A/c No.", lambda e, s: e.bank_account_no, "text"),
+        ("PF No. / UAN", lambda e, s: e.pf_uan_no, "text"),
+        ("E.S.I.C. No.", lambda e, s: e.esic_no, "text"),
+    ]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Employees"
+    ws.append([header for header, _, _ in columns])
+
+    for emp in employees:
+        salary = get_employee_monthly_salary(db, emp.id, ist_now.year, ist_now.month, emp.base_salary)
+        ws.append([getter(emp, salary) for _, getter, _ in columns])
+
+    header_font = Font(name="Calibri", size=11, bold=True, color="FFFFFF")
+    header_fill = PatternFill(start_color="0F5132", end_color="0F5132", fill_type="solid")
+    zebra_fill = PatternFill(start_color="F8F9FA", end_color="F8F9FA", fill_type="solid")
+    side = Side(style="thin", color="E0E0E0")
+    border = Border(left=side, right=side, top=side, bottom=side)
+
+    ws.row_dimensions[1].height = 28
+    for col_idx, (_, _, kind) in enumerate(columns, start=1):
+        head = ws.cell(row=1, column=col_idx)
+        head.font, head.fill, head.border = header_font, header_fill, border
+        head.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+        longest = len(str(head.value))
+        for row_idx in range(2, ws.max_row + 1):
+            cell = ws.cell(row=row_idx, column=col_idx)
+            cell.font = Font(name="Calibri", size=10)
+            cell.border = border
+            if row_idx % 2 == 0:
+                cell.fill = zebra_fill
+            if kind == "date":
+                cell.number_format = "DD-MMM-YYYY"
+                cell.alignment = Alignment(horizontal="center", vertical="center")
+                longest = max(longest, 11)
+            elif kind == "money":
+                cell.number_format = "#,##0.00"
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                longest = max(longest, len(f"{(cell.value or 0):,.2f}"))
+            else:
+                # account / PAN / phone numbers must stay text (no 1.2E+10, no lost leading zeros)
+                if isinstance(cell.value, str):
+                    cell.number_format = "@"
+                cell.alignment = Alignment(
+                    horizontal="center" if kind == "center" else "left", vertical="center"
+                )
+                longest = max(longest, len(str(cell.value or "")))
+        ws.column_dimensions[head.column_letter].width = min(max(longest, 12) + 3, 45)
+
+    ws.freeze_panes = "A2"  # keep header row only; all columns scroll horizontally
+    ws.auto_filter.ref = ws.dimensions
+
+    buf = BytesIO()
+    wb.save(buf)
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="Employees_{ist_now.date().isoformat()}.xlsx"'}
+    )

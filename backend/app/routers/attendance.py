@@ -17,7 +17,7 @@ from app.models.holiday import Holiday
 from app.models.working_days import WorkingDaysConfig
 from app.models.comp_off import CompOffBalance, CompOffTransaction
 from app.models.notification import FaceVerificationFailure
-from app.schemas.attendance import AttendanceResponse, CheckInRequest, CheckOutRequest, OverrideRequest, PaidLeaveRequest, RegularizationAction, RegularizeRequest
+from app.schemas.attendance import AttendanceResponse, CheckInRequest, CheckOutRequest, OverrideRequest, PaidLeaveBulkRemove, PaidLeaveRequest, RegularizationAction, RegularizeRequest
 from app.services.aws_rekognition_service import AwsRekognitionError, compare_faces
 from app.services.face_storage_service import FaceStorageError, get_face_path, save_attendance_face, BACKEND_ROOT
 from app.services.gps_service import calculate_distance_meters
@@ -29,17 +29,24 @@ router = APIRouter(
 
 
 LATE_GRACE_MINUTES = 15
+DEFAULT_LATE_AFTER_MINUTES = 11 * 60 + 10  # no shift start set: late after 11:10
 
 
-def compute_checkin_status(checkin_dt, preferred_time: Optional[str]) -> str:
-    """'late' when check-in is more than LATE_GRACE_MINUTES after the employee's preferred
-    check-in time (e.g. preferred 10:00 -> late from 10:16). 'early_bird' when at least an
-    hour before it, otherwise 'on_time'."""
+def compute_checkin_status(checkin_dt, shift_start: Optional[str]) -> str:
+    """Based ONLY on the admin-set shift start time (employee edit form), never on the
+    employee's own reminder time. With no shift start set, 'late' only after
+    DEFAULT_LATE_AFTER (11:10), otherwise 'on_time'.
+    With a shift start: 'late' when check-in is more than LATE_GRACE_MINUTES after it
+    (e.g. 10:00 -> late from 10:16). 'early_bird' when at least an hour before it,
+    otherwise 'on_time'."""
+    if not shift_start:
+        actual = checkin_dt.hour * 60 + checkin_dt.minute
+        return "late" if actual > DEFAULT_LATE_AFTER_MINUTES else "on_time"
     try:
-        hh, mm = (preferred_time or "09:00").split(":")[:2]
+        hh, mm = shift_start.split(":")[:2]
         preferred_minutes = int(hh) * 60 + int(mm)
     except (ValueError, AttributeError):
-        preferred_minutes = 9 * 60
+        return "on_time"
     actual_minutes = checkin_dt.hour * 60 + checkin_dt.minute
     if actual_minutes > preferred_minutes + LATE_GRACE_MINUTES:
         return "late"
@@ -258,7 +265,7 @@ def checkin(
         )
 
     now = now_ist()   # IST-aware datetime
-    checkin_status = compute_checkin_status(now, current_user.preferred_checkin_time)
+    checkin_status = compute_checkin_status(now, current_user.shift_start)
 
     if not attendance:
         attendance = AttendanceLog(
@@ -692,9 +699,17 @@ def give_paid_leave(
     if (data.end_date - data.start_date).days + 1 > PAID_LEAVE_MAX_DAYS:
         raise HTTPException(status_code=400, detail=f"Date range cannot exceed {PAID_LEAVE_MAX_DAYS} days")
 
-    employee = db.query(User).filter(User.id == data.user_id).first()
-    if not employee:
-        raise HTTPException(status_code=404, detail="Employee not found")
+    if data.all_employees:
+        employees = db.query(User).filter(User.role == "employee", User.is_active == True).all()
+        if not employees:
+            raise HTTPException(status_code=404, detail="No active employees found")
+    else:
+        if not data.user_id:
+            raise HTTPException(status_code=400, detail="Select an employee or choose all employees")
+        employee = db.query(User).filter(User.id == data.user_id).first()
+        if not employee:
+            raise HTTPException(status_code=404, detail="Employee not found")
+        employees = [employee]
 
     working_days = db.query(WorkingDaysConfig).first()
     days_map = [True, True, True, True, True, True, False]
@@ -709,54 +724,75 @@ def give_paid_leave(
             Holiday.date >= data.start_date, Holiday.date <= data.end_date
         ).all()
     }
-    existing_logs = {
-        log.date: log for log in db.query(AttendanceLog).filter(
-            AttendanceLog.user_id == employee.id,
-            AttendanceLog.date >= data.start_date,
-            AttendanceLog.date <= data.end_date
-        ).all()
-    }
+    all_logs = {}
+    for log in db.query(AttendanceLog).filter(
+        AttendanceLog.user_id.in_([e.id for e in employees]),
+        AttendanceLog.date >= data.start_date,
+        AttendanceLog.date <= data.end_date
+    ).all():
+        all_logs[(log.user_id, log.date)] = log
 
-    employee_joined = date.fromisoformat(employee.joining_date) if employee.joining_date else None
     note = (data.note or "").strip() or None
     override_note = f"Paid leave granted by admin{': ' + note if note else ''}"
-    granted, skipped = [], []
+    granted_dates = set()      # distinct dates granted (single-employee response)
+    skipped = []               # per-day reasons (single-employee response)
+    records_granted = 0        # total day-records written across employees
+    employees_affected = 0
+    now = now_ist()
 
-    d = data.start_date
-    while d <= data.end_date:
-        label = d.isoformat()
-        if (employee_joined and d < employee_joined) or (employee.date_of_exit and d > employee.date_of_exit):
-            skipped.append({"date": label, "reason": "Outside employment dates"})
-        elif not is_user_expected_working_day(d, employee.saturday_policy or "alt_sat_holiday", holiday_dates, days_map):
-            skipped.append({"date": label, "reason": "Week off / holiday (already paid)"})
-        else:
-            log = existing_logs.get(d)
-            if log and log.day_status == PAID_LEAVE_STATUS:
-                skipped.append({"date": label, "reason": "Already paid leave"})
-            elif log and (log.checkin_time is not None or log.day_status in ("full_day", "half_day", "holiday_work")):
-                skipped.append({"date": label, "reason": "Has attendance - use Override to change it"})
+    for employee in employees:
+        employee_joined = date.fromisoformat(employee.joining_date) if employee.joining_date else None
+        granted_here = 0
+        d = data.start_date
+        while d <= data.end_date:
+            label = d.isoformat()
+            reason = None
+            if (employee_joined and d < employee_joined) or (employee.date_of_exit and d > employee.date_of_exit):
+                reason = "Outside employment dates"
+            elif not is_user_expected_working_day(d, employee.saturday_policy or "alt_sat_holiday", holiday_dates, days_map):
+                reason = "Week off / holiday (already paid)"
             else:
-                if not log:
-                    log = AttendanceLog(user_id=employee.id, date=d)
-                    db.add(log)
-                log.checkin_time = None
-                log.checkout_time = None
-                log.total_hours = 0.0
-                log.checkin_status = None
-                log.checkout_status = None
-                log.day_status = PAID_LEAVE_STATUS
-                log.is_manual_override = True
-                log.override_by = current_user.id
-                log.override_at = now_ist()
-                log.override_note = override_note
-                granted.append(label)
-        d += timedelta(days=1)
+                log = all_logs.get((employee.id, d))
+                if log and log.day_status == PAID_LEAVE_STATUS:
+                    reason = "Already paid leave"
+                elif log and (log.checkin_time is not None or log.day_status in ("full_day", "half_day", "holiday_work")):
+                    reason = "Has attendance - use Override to change it"
+                else:
+                    if not log:
+                        log = AttendanceLog(user_id=employee.id, date=d)
+                        db.add(log)
+                    log.checkin_time = None
+                    log.checkout_time = None
+                    log.total_hours = 0.0
+                    log.checkin_status = None
+                    log.checkout_status = None
+                    log.day_status = PAID_LEAVE_STATUS
+                    log.is_manual_override = True
+                    log.override_by = current_user.id
+                    log.override_at = now
+                    log.override_note = override_note
+                    granted_dates.add(label)
+                    granted_here += 1
+            if reason and not data.all_employees:
+                skipped.append({"date": label, "reason": reason})
+            d += timedelta(days=1)
+        records_granted += granted_here
+        if granted_here:
+            employees_affected += 1
 
     db.commit()
 
+    if data.all_employees:
+        message = (
+            f"Paid leave granted to {employees_affected} of {len(employees)} employee(s) "
+            f"({records_granted} day(s) in total)"
+        )
+    else:
+        message = f"Paid leave granted for {records_granted} day(s)"
+
     return {
-        "message": f"Paid leave granted for {len(granted)} day(s)",
-        "granted": granted,
+        "message": message,
+        "granted": sorted(granted_dates),
         "skipped": skipped
     }
 
@@ -772,7 +808,7 @@ def list_paid_leaves(
     ).filter(
         AttendanceLog.day_status == PAID_LEAVE_STATUS,
         User.email != "admin@glrattendance.com"
-    ).order_by(AttendanceLog.date.desc()).limit(200).all()
+    ).order_by(AttendanceLog.date.desc()).limit(1000).all()
 
     return [
         {
@@ -785,6 +821,27 @@ def list_paid_leaves(
         }
         for log, user in rows
     ]
+
+
+@router.post("/paid-leave/remove-bulk")
+def remove_paid_leave_bulk(
+    data: PaidLeaveBulkRemove,
+    current_user: User = Depends(require_admin_or_superadmin),
+    db: Session = Depends(get_db)
+):
+    """Take back every paid leave between two dates for all employees (undo a grant to all)."""
+    if data.end_date < data.start_date:
+        raise HTTPException(status_code=400, detail="End date cannot be before start date")
+    if (data.end_date - data.start_date).days + 1 > PAID_LEAVE_MAX_DAYS:
+        raise HTTPException(status_code=400, detail=f"Date range cannot exceed {PAID_LEAVE_MAX_DAYS} days")
+
+    removed = db.query(AttendanceLog).filter(
+        AttendanceLog.day_status == PAID_LEAVE_STATUS,
+        AttendanceLog.date >= data.start_date,
+        AttendanceLog.date <= data.end_date
+    ).delete(synchronize_session=False)
+    db.commit()
+    return {"message": f"Removed {removed} paid leave record(s)", "removed": removed}
 
 
 @router.delete("/paid-leave/{attendance_id}")
@@ -874,7 +931,7 @@ def _apply_attendance_override(
         if attendance.checkin_time:
             attendance.checkin_status = compute_checkin_status(
                 attendance.checkin_time,
-                target_user.preferred_checkin_time if target_user else None
+                target_user.shift_start if target_user else None
             )
         else:
             attendance.checkin_status = None

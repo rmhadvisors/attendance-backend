@@ -21,6 +21,18 @@ class EmployeeCreate(BaseModel):
     reporting_manager: Optional[str] = None
     shift_start: Optional[str] = None
     shift_end: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    personal_email: Optional[str] = None
+    blood_group: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    pf_uan_no: Optional[str] = None
+    esic_no: Optional[str] = None
+    work_location: Optional[str] = None
+    employment_type: Optional[str] = "full_time"
 
 
 class EmployeeUpdate(BaseModel):
@@ -41,6 +53,18 @@ class EmployeeUpdate(BaseModel):
     reporting_manager: Optional[str] = None
     shift_start: Optional[str] = None
     shift_end: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    personal_email: Optional[str] = None
+    blood_group: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    pf_uan_no: Optional[str] = None
+    esic_no: Optional[str] = None
+    work_location: Optional[str] = None
+    employment_type: Optional[str] = "full_time"
     # Admin-set password (e.g. when the employee forgets theirs). Omit/blank to leave unchanged.
     new_password: Optional[str] = Field(default=None, min_length=6)
 
@@ -65,6 +89,18 @@ class EmployeeResponse(BaseModel):
     reporting_manager: Optional[str] = None
     shift_start: Optional[str] = None
     shift_end: Optional[str] = None
+    date_of_birth: Optional[date] = None
+    personal_email: Optional[str] = None
+    blood_group: Optional[str] = None
+    emergency_contact_name: Optional[str] = None
+    emergency_contact_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    bank_name: Optional[str] = None
+    bank_account_no: Optional[str] = None
+    pf_uan_no: Optional[str] = None
+    esic_no: Optional[str] = None
+    work_location: Optional[str] = None
+    employment_type: Optional[str] = "full_time"
 
 class UserPreferencesUpdate(BaseModel):
     preferred_checkin_time: Optional[str] = "09:00"

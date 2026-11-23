@@ -6,3 +6,4 @@ uvicorn.log
 uvicorn.err.log
 face_data/
 exports/
+extras/

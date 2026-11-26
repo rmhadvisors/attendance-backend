@@ -7,3 +7,5 @@ uvicorn.err.log
 face_data/
 exports/
 extras/
+letters/
+letter_archive/

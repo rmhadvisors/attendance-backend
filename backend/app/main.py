@@ -14,6 +14,7 @@ from app.models.holiday import Holiday  # noqa: F401
 from app.models.working_days import WorkingDaysConfig  # noqa: F401
 from app.models.comp_off import CompOffBalance, CompOffTransaction  # noqa: F401
 from app.models.leave import LeaveRequest  # noqa: F401
+from app.models.letter import GeneratedLetter  # noqa: F401
 from app.models.payroll import MonthlySalary, PayrollAdjustment, PayslipEntry  # noqa: F401
 from app.models.notification import (  # noqa: F401
     NotificationLog,
@@ -86,7 +87,7 @@ app.add_middleware(
 )
 
 # ── Routers ─────────────────────────────────────────────────────────────────
-from app.routers import auth, employees, attendance, face, location, dashboard, export, company, leave, payroll, push  # noqa: E402
+from app.routers import auth, employees, attendance, face, location, dashboard, export, company, leave, payroll, push, letters  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(dashboard.router)
@@ -99,6 +100,7 @@ app.include_router(company.router)
 app.include_router(leave.router)
 app.include_router(payroll.router)
 app.include_router(push.router)
+app.include_router(letters.router)
 
 
 
